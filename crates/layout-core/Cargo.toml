@@ -1,0 +1,8 @@
+[package]
+name = "hypr-rust-layout-core"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "layout_core"
+path = "src/lib.rs"
