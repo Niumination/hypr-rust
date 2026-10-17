@@ -1,8 +1,8 @@
 # Product Requirements Document
 
 **Product:** Hypr-Rust (working title)  
-**Status:** Interview baseline — draft for feasibility validation  
-**Last updated:** 2026-10-17  
+**Status:** Interview baseline with macOS-first execution plan — draft for feasibility validation  
+**Last updated:** 2026-10-18  
 **Owners to assign:** Product, Rust lead, Windows platform lead, macOS platform lead, QA/security
 
 ## 1. Problem statement
@@ -11,11 +11,18 @@ Users want a keyboard-centric dynamic tiling workflow inspired by Hyprland while
 
 ## 2. Interview decisions — baseline
 
+### Current execution focus (supersedes earlier parallel-spike sequencing)
+
+Implement and test macOS window control first on the user's current device: Lenovo ThinkPad X13 Yoga Gen 1, Intel i5-10310U, dual-booted into macOS Tahoe 26.7.1 (owner-reported; verify with the read-only system collector). Windows 11 work is deferred until the next Windows boot. This specific test setup does not establish support for Apple-branded Macs, Ventura 13, or other versions/hardware. The product's eventual Apple-hardware/macOS support matrix remains to be validated. See [USER-DEVICE-PROFILE](./USER-DEVICE-PROFILE.md) and [MACOS-TAHOE-NEXT-STAGE](./MACOS-TAHOE-NEXT-STAGE.md).
+
+The current device is non-Apple hardware. Apple's [macOS Tahoe Software License Agreement](https://www.apple.com/legal/sla/docs/macOSTahoe.pdf) is headed “For use on Apple-branded Systems”; legal/product review is required before making distribution/support claims about this host. This is not legal advice.
+
 | Area | Decision | Status / caveat |
 |---|---|---|
 | Product boundary | Native tiling window manager/controller, not a compositor port | Agreed |
-| Targets | Windows 11 x64 + Intel macOS 13 (Ventura) or later | Agreed; verify Intel hardware and API behavior on exact builds |
-| Development strategy | Build/test both platform vertical slices in parallel, with a shared Rust core | Agreed; feasibility spikes first |
+| Long-term target | Windows 11 x64 + native macOS app; exact supported Apple hardware and minimum macOS version are not yet validated | Product goal, support matrix pending |
+| Current validation host | ThinkPad X13 Yoga Gen 1, Intel i5-10310U, macOS Tahoe 26.7.1 | Owner-reported; exact system model/build must be collected and reconciled with upstream spike report |
+| Development sequencing | macOS first on current boot; Windows later on same physical device after switching OS; keep shared core portable | Current plan; replaces earlier parallel-native-spike plan |
 | App shell | Tray app on Windows; menu-bar app on macOS; settings UI | Agreed |
 | Tiling | BSP, master/stack, monocle, and columns/rows; configurable gaps/margins/ratio | Agreed as initial layout set |
 | Keyboard | Keyboard-first; workspace shortcuts are a user priority; use OS-appropriate defaults that users can change | Agreed; actual workspace controls gated by platform API validation |

@@ -25,11 +25,14 @@ The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md)
 4. [Quality, testing and release plan](./QUALITY.md)
 5. [Roadmap and milestones](./ROADMAP.md)
 6. [Native platform spike protocol](./PLATFORM-SPIKES.md)
-7. [OpenCode / Hermes handoff plan](./AGENT-HANDOFF.md)
-8. [ADR-0001: native window manager, not compositor port](./adr/0001-product-boundary.md)
-9. [ADR-0002: shared core + OS adapters](./adr/0002-core-and-platform-adapters.md)
-10. [ADR-0003: native workspace capability gate; no hide/minimize emulation](./adr/0003-native-workspaces.md)
-11. [Agent workflow inspired by Karpathy's engineering heuristics](./AGENT-WORKFLOW.md)
+7. [Current user device profile](./USER-DEVICE-PROFILE.md)
+8. [macOS Tahoe next implementation stage](./MACOS-TAHOE-NEXT-STAGE.md)
+9. [Read-only system information collection](./SYSTEM-INFO-COLLECTION.md)
+10. [OpenCode / Hermes handoff plan](./AGENT-HANDOFF.md)
+11. [ADR-0001: native window manager, not compositor port](./adr/0001-product-boundary.md)
+12. [ADR-0002: shared core + OS adapters](./adr/0002-core-and-platform-adapters.md)
+13. [ADR-0003: native workspace capability gate; no hide/minimize emulation](./adr/0003-native-workspaces.md)
+14. [Agent workflow inspired by Karpathy's engineering heuristics](./AGENT-WORKFLOW.md)
 
 ## Non-goals and important caveats
 
@@ -40,8 +43,8 @@ The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md)
 
 ## Current implementation state
 
-The workspace now contains a platform-neutral layout-core scaffold and a native spike protocol. It is **not yet a usable desktop app**: Windows/macOS adapters, tray/menu-bar UI, settings UI, global hotkeys, packaging and native workspace implementation are outstanding. The scaffold has not been compiled here because `rustc`/`cargo` were unavailable in the authoring environment; see the root `README.md` and have CI/your machine run the stated commands.
+The upstream `main` branch contains the platform-neutral layout-core scaffold. Its latest main commit reports `fmt`, `clippy` and 6 tests passing on the user's macOS host. Two open PRs add a macOS Swift spike report/harness and min-size constraints (the latter reports 13 tests); neither was merged at last review. The macOS spike reports ordinary AX control on a self-owned test window and disables Spaces. It also contains a Dock-position mutation that must be removed before rerunning/merging. The host label in that report must be reconciled with the user's ThinkPad clarification. This remains **not a usable desktop app**: a Rust macOS adapter, Windows adapter, tray/menu-bar UI, settings UI, global hotkeys and packaging are outstanding. See [user device profile](./USER-DEVICE-PROFILE.md), [macOS next stage](./MACOS-TAHOE-NEXT-STAGE.md), and [handoff plan](./AGENT-HANDOFF.md).
 
 ## Definition of success for the first usable release
 
-A user can install the app on Windows 11 x64 or Intel macOS Ventura 13+, configure it in the settings UI, explicitly opt into auto-tiling, and manage supported windows with layouts and platform-appropriate shortcuts. The app leaves window geometry as last accepted on quit. Native workspace shortcuts are available only on platforms/builds where public-API behavior is verified; unsupported workspace features are clearly disabled, never emulated by hiding/minimizing windows.
+The planned app will manage supported windows with shared layouts and native adapters. The current implementation milestone is a narrow macOS Tahoe 26.7.1 Rust AX proof on the user's ThinkPad X13 Yoga Gen 1; this host-specific result does not establish Apple hardware or older macOS support. Windows 11 native work is deferred until the device boots Windows. Native macOS workspaces remain disabled. Product-wide compatibility claims wait for platform evidence.
