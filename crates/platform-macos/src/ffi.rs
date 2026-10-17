@@ -86,6 +86,11 @@ extern "C" {
     /// Safety: standard POSIX semantics; `pid` must be a valid process id.
     pub fn kill(pid: c_int, sig: c_int) -> c_int;
 
+    /// Thread-local errno (libSystem). Safety: returns a valid pointer to
+    /// the calling thread's errno value; read immediately after a failing
+    /// syscall.
+    pub fn __error() -> *mut c_int;
+
     /// Number of elements in a CFArray. Safety: `array` live CFArrayRef.
     pub fn CFArrayGetCount(array: CFTypeRef) -> isize;
 

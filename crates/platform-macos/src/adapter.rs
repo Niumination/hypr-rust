@@ -63,7 +63,7 @@ fn k_ax_raise_action() -> ffi::CFStringRef {
 
 /// Typed failure modes. Every AXError code maps to exactly one variant so the
 /// executor can branch on the real cause instead of a generic failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AxError {
     /// Process lacks Accessibility permission (or AX API disabled).
     PermissionDenied,
@@ -75,6 +75,17 @@ pub enum AxError {
     IllegalArgument,
     /// The application exposes no windows.
     NoWindows,
+    /// Frame geometry is not writable: non-finite coordinate/size or
+    /// non-positive size. Rejected before any write.
+    InvalidGeometry,
+    /// The size write was rejected after the position write had already
+    /// been applied. The original position was restored (or the restore
+    /// failed — `rollback_restored` says which), so the caller knows the
+    /// window is (or is not) left in a partial state.
+    SizeAfterPositionFailed {
+        source: Box<AxError>,
+        rollback_restored: bool,
+    },
     /// Any other AXError code, carried verbatim.
     Failure(i32),
 }
@@ -87,6 +98,23 @@ impl fmt::Display for AxError {
             Self::Unsupported => write!(f, "unsupported attribute/action"),
             Self::IllegalArgument => write!(f, "illegal argument"),
             Self::NoWindows => write!(f, "no windows for target"),
+            Self::InvalidGeometry => {
+                write!(f, "invalid geometry (non-finite or non-positive size)")
+            }
+            Self::SizeAfterPositionFailed {
+                source,
+                rollback_restored: true,
+            } => write!(
+                f,
+                "size write rejected after position applied ({source}); original position restored"
+            ),
+            Self::SizeAfterPositionFailed {
+                source,
+                rollback_restored: false,
+            } => write!(
+                f,
+                "size write rejected after position applied ({source}); ROLLBACK FAILED - window left at new position with old size"
+            ),
             Self::Failure(code) => write!(f, "AX failure (code {code})"),
         }
     }
@@ -111,6 +139,44 @@ pub fn map_ax_error(code: i32) -> AxError {
         -25205 | -25206 | -25208 | -25212 | -25213 => AxError::Unsupported,
         -25201 => AxError::IllegalArgument,
         other => AxError::Failure(other),
+    }
+}
+
+/// ESRCH — no such process (POSIX).
+const K_ERRNO_ESRCH: i32 = 3;
+
+/// Liveness from a `kill(pid, 0)` result plus errno.
+///
+/// Only ESRCH means the process is dead. EPERM means the process exists
+/// but is owned by another user; any other errno also assumes "alive" so
+/// the AX calls surface the real failure instead of a false stale report.
+fn process_alive_from_kill(ret: i32, errno: i32) -> bool {
+    if ret == 0 {
+        return true;
+    }
+    errno != K_ERRNO_ESRCH
+}
+
+/// AXError codes that mean "the main-window attribute is not available"
+/// and should fall back to the AXWindows list. Real failures (permission,
+/// stale, cannotComplete, illegal argument) must propagate.
+fn is_missing_main_window(code: i32) -> bool {
+    matches!(code, -25212 | -25205) // noValue | attributeUnsupported
+}
+
+/// Validate frame geometry before any write: finite coordinates and
+/// positive, finite size.
+fn validate_frame_rect(rect: Rect) -> Result<(), AxError> {
+    if rect.x.is_finite()
+        && rect.y.is_finite()
+        && rect.width.is_finite()
+        && rect.height.is_finite()
+        && rect.width > 0.0
+        && rect.height > 0.0
+    {
+        Ok(())
+    } else {
+        Err(AxError::InvalidGeometry)
     }
 }
 
@@ -167,8 +233,9 @@ impl MacAxAdapter {
     /// Resolve the main window of the application owned by `pid`.
     ///
     /// Prefers kAXMainWindowAttribute; falls back to the first entry of
-    /// kAXWindowsAttribute. A dead pid surfaces as [`AxError::StaleTarget`]
-    /// (kAXErrorInvalidUIElement) — the stale-handle path.
+    /// kAXWindowsAttribute when the main-window attribute is unavailable
+    /// (noValue / attributeUnsupported) or null. A dead pid surfaces as
+    /// [`AxError::StaleTarget`] — the stale-handle path.
     pub fn main_window(&self, pid: u32) -> Result<AxWindow, AxError> {
         // SAFETY: pid is a valid process identifier; returns owned ref or null.
         let app = unsafe { ffi::AXUIElementCreateApplication(pid as std::os::raw::c_int) };
@@ -176,10 +243,13 @@ impl MacAxAdapter {
             return Err(AxError::StaleTarget);
         }
         // Stale pre-check: a dead pid surfaces as kAXErrorCannotComplete on
-        // this build, so verify liveness explicitly (sig 0 = existence only).
+        // this build, so verify liveness explicitly (sig 0 = existence
+        // only). Only ESRCH means dead; EPERM means alive-but-not-ours.
         // SAFETY: kill with sig 0 sends no signal; standard POSIX check.
-        let alive = unsafe { ffi::kill(pid as std::os::raw::c_int, 0) } == 0;
-        if !alive {
+        // SAFETY: __error is the thread-local errno pointer (libSystem).
+        let ret = unsafe { ffi::kill(pid as std::os::raw::c_int, 0) };
+        let errno = unsafe { *ffi::__error() };
+        if !process_alive_from_kill(ret, errno) {
             // SAFETY: app is a live owned ref; released exactly once here.
             unsafe { ffi::CFRelease(app as ffi::CFTypeRef) };
             return Err(AxError::StaleTarget);
@@ -191,17 +261,23 @@ impl MacAxAdapter {
             ffi::AXUIElementCopyAttributeValue(app, k_ax_main_window_attribute(), &mut val)
         };
         if code == 0 && !val.is_null() {
-            // val is an owned AXUIElementRef; transfer ownership to AxWindow.
+            // val (window) ownership transfers to AxWindow; the app element
+            // is no longer needed and must be released on this success path.
+            // SAFETY: app is a live owned ref; released exactly once here.
+            unsafe { ffi::CFRelease(app as ffi::CFTypeRef) };
             return Ok(AxWindow::from_raw(val as ffi::AXUIElementRef));
         }
-        if code != 0 {
+        if code != 0 && !is_missing_main_window(code) {
+            // Real failure (permission, stale, cannotComplete, illegal):
+            // propagate without fallback.
             let err = map_ax_error(code);
             // SAFETY: app is a live owned ref; released exactly once here.
             unsafe { ffi::CFRelease(app as ffi::CFTypeRef) };
             return Err(err);
         }
-        // kAXMainWindowAttribute returned null: fall back to the window list.
-        // SAFETY: app live; val receives an owned CFArrayRef.
+        // Attribute unavailable (noValue/attributeUnsupported) or null value:
+        // fall back to the window list.
+        // SAFETY: app live; list receives an owned CFArrayRef.
         let mut list: ffi::CFTypeRef = ptr::null();
         let code =
             unsafe { ffi::AXUIElementCopyAttributeValue(app, k_ax_windows_attribute(), &mut list) };
@@ -245,16 +321,47 @@ impl MacAxAdapter {
         Ok(Rect::new(x, y, w, h))
     }
 
-    /// Move and resize the window. Position and size are separate AX writes;
-    /// both must succeed or the error of the failing write is returned.
+    /// Move and resize the window with a no-partial-mutation contract:
+    ///
+    /// 1. Preflight: geometry must be finite with positive size
+    ///    ([`AxError::InvalidGeometry`] otherwise — nothing is written).
+    /// 2. The current geometry is saved before the first write.
+    /// 3. Position is written, then size. If the size write is rejected,
+    ///    the saved position is restored and verified by read-back; the
+    ///    error ([`AxError::SizeAfterPositionFailed`]) states explicitly
+    ///    whether the rollback succeeded, so a rejected operation never
+    ///    leaves the window changed without a clear report.
     pub fn set_window_frame(&self, window: &AxWindow, rect: Rect) -> Result<(), AxError> {
+        validate_frame_rect(rect)?;
+        // Save first: if the size write fails after the position write
+        // lands, this is the rollback target.
+        let before = self.window_frame(window)?;
         self.write_point(window.element(), k_ax_position_attribute(), rect.x, rect.y)?;
-        self.write_size(
+        if let Err(source) = self.write_size(
             window.element(),
             k_ax_size_attribute(),
             rect.width,
             rect.height,
-        )
+        ) {
+            // Rollback: restore the saved position, then verify by reading
+            // the frame back. Restore failure is reported, not hidden.
+            let restore = self.write_point(
+                window.element(),
+                k_ax_position_attribute(),
+                before.x,
+                before.y,
+            );
+            let rollback_restored = restore.is_ok()
+                && self
+                    .window_frame(window)
+                    .map(|r| (r.x - before.x).abs() <= 1.0 && (r.y - before.y).abs() <= 1.0)
+                    .unwrap_or(false);
+            return Err(AxError::SizeAfterPositionFailed {
+                source: Box::new(source),
+                rollback_restored,
+            });
+        }
+        Ok(())
     }
 
     /// Request window raise (focus request). Explicit user-visible action;
@@ -439,5 +546,63 @@ mod tests {
         assert!(AxError::Unsupported.to_string().contains("unsupported"));
         assert!(AxError::NoWindows.to_string().contains("no windows"));
         assert!(AxError::Failure(-25204).to_string().contains("-25204"));
+        assert!(AxError::InvalidGeometry
+            .to_string()
+            .contains("invalid geometry"));
+        let rolled_back = AxError::SizeAfterPositionFailed {
+            source: Box::new(AxError::Unsupported),
+            rollback_restored: true,
+        };
+        assert!(rolled_back
+            .to_string()
+            .contains("original position restored"));
+        let not_restored = AxError::SizeAfterPositionFailed {
+            source: Box::new(AxError::Unsupported),
+            rollback_restored: false,
+        };
+        assert!(not_restored.to_string().contains("ROLLBACK FAILED"));
+    }
+
+    #[test]
+    fn liveness_check_distinguishes_esrch_from_eperm() {
+        // ret 0 = alive; ESRCH = dead; EPERM/other = alive (AX will
+        // surface the real error).
+        assert!(process_alive_from_kill(0, 0));
+        assert!(!process_alive_from_kill(-1, K_ERRNO_ESRCH));
+        assert!(process_alive_from_kill(-1, 1)); // EPERM: exists, not ours
+        assert!(process_alive_from_kill(-1, 22)); // EINVAL: assume alive
+    }
+
+    #[test]
+    fn main_window_fallback_only_for_missing_attribute() {
+        // noValue / attributeUnsupported -> fallback to AXWindows.
+        assert!(is_missing_main_window(-25212));
+        assert!(is_missing_main_window(-25205));
+        // Real failures propagate.
+        assert!(!is_missing_main_window(-25211)); // apiDisabled
+        assert!(!is_missing_main_window(-25202)); // invalidUIElement
+        assert!(!is_missing_main_window(-25204)); // cannotComplete
+        assert!(!is_missing_main_window(-25201)); // illegalArgument
+    }
+
+    #[test]
+    fn frame_validation_rejects_non_finite_and_non_positive() {
+        assert!(validate_frame_rect(Rect::new(0.0, 0.0, 100.0, 50.0)).is_ok());
+        assert_eq!(
+            validate_frame_rect(Rect::new(f64::NAN, 0.0, 100.0, 50.0)),
+            Err(AxError::InvalidGeometry)
+        );
+        assert_eq!(
+            validate_frame_rect(Rect::new(0.0, f64::INFINITY, 100.0, 50.0)),
+            Err(AxError::InvalidGeometry)
+        );
+        assert_eq!(
+            validate_frame_rect(Rect::new(0.0, 0.0, 0.0, 50.0)),
+            Err(AxError::InvalidGeometry)
+        );
+        assert_eq!(
+            validate_frame_rect(Rect::new(0.0, 0.0, 100.0, -1.0)),
+            Err(AxError::InvalidGeometry)
+        );
     }
 }

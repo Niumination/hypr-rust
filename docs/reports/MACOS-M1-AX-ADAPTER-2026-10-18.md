@@ -73,46 +73,64 @@ Temuan implementasi (jujur):
 
 ## 4. Verifikasi toolchain (verbatim)
 
+`platform-macos` sengaja **bukan** workspace member (lihat §6 P1-2): command Windows-safe untuk workspace + command eksplisit untuk crate macOS.
+
 ```
-$ cargo fmt --check
+$ cargo fmt --check                                  # workspace (layout-core)
+OK
+$ cargo fmt --manifest-path crates/platform-macos/Cargo.toml --check
 OK
 $ MACOSX_DEPLOYMENT_TARGET=26.0 cargo clippy --workspace --all-targets -- -D warnings
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.68s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.69s
+$ MACOSX_DEPLOYMENT_TARGET=26.0 cargo clippy --manifest-path crates/platform-macos/Cargo.toml --all-targets -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
 $ MACOSX_DEPLOYMENT_TARGET=26.0 cargo test --workspace
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s   (layout-core)
-test result: ok. 2 passed; 0 failed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s   (platform-macos: AXError mapping + Display)
+test result: ok. 6 passed; 0 failed; ... (layout-core)
+$ cd crates/platform-macos && MACOSX_DEPLOYMENT_TARGET=26.0 cargo test
+test result: ok. 5 passed; 0 failed; ... (platform-macos: AXError mapping, Display, liveness ESRCH/EPERM, main-window fallback decision, frame validation)
 ```
 
-8/8 test hijau. Test unit platform-macos murni Rust (tanpa AX): mapping 15 kode AXError → varian berbeda, Display string.
+11/11 test hijau (6 workspace + 5 platform-macos).
 
 ---
 
 ## 5. Native run di host (verbatim)
 
-Target: self-owned `HYPR-SPIKE-TARGET` (window 420×312) di-spawn oleh Swift spike harness (disposable, versi Dock-fix @ `669e178`). Probe Rust hanya memutasi pid target eksplisit.
+**Rerun 18 Okt 2026 (post-review, adapter fixed)** — target: self-owned `HYPR-SPIKE-TARGET` (window 420×312) di-spawn oleh Swift spike harness (disposable, versi Dock-fix @ `669e178`). Probe Rust hanya memutasi pid target eksplisit.
 
 ```
-$ /tmp/spike-macos spawn-target &        # PID 79107
-$ ./target/debug/ax-probe frame 79107
+$ /tmp/spike-macos spawn-target &        # PID 10042
+$ ax-probe frame 10042
 ok {x: 100, y: 668, width: 420, height: 312}
-$ ./target/debug/ax-probe set-frame 79107 120 120 420 312
+$ ax-probe set-frame 10042 120 120 420 312
 ok {x: 120, y: 120, width: 420, height: 312}
-$ ./target/debug/ax-probe set-frame 79107 180 140 420 312
+$ ax-probe set-frame 10042 180 140 420 312
 ok {x: 180, y: 140, width: 420, height: 312}
-$ ./target/debug/ax-probe set-frame 79107 150 130 420 312
+$ ax-probe set-frame 10042 150 130 420 312
 ok {x: 150, y: 130, width: 420, height: 312}
-$ ./target/debug/ax-probe set-frame 79107 150 130 480 320
+$ ax-probe set-frame 10042 150 130 480 320
 ok {x: 150, y: 130, width: 480, height: 320}
-$ ./target/debug/ax-probe raise 79107
+$ ax-probe raise 10042
 ok raised
-$ kill 79107; sleep 1
-$ ./target/debug/ax-probe frame 79107
+$ ax-probe set-frame 10042 nan 130 480 320
+error: invalid geometry (non-finite or non-positive size)
+invalid-exit=1
+$ ax-probe set-frame 10042 150 130 0 320
+error: invalid geometry (non-finite or non-positive size)
+zero-exit=1
+$ ax-probe frame 10042                  # window unchanged after rejects
+ok {x: 150, y: 130, width: 480, height: 320}
+$ kill 10042; sleep 1
+$ ax-probe frame 10042
 error: stale target (process/window gone)
 stale-exit=4
-$ ./target/debug/ax-probe frame 999999
-error: stale target (process/window gone)
-nonexistent-exit=4
 ```
+
+Rerun identik dengan run pertama (17 Okt) untuk semua operasi inti; validasi geometry kini live-terverifikasi (NaN dan zero-size ditolak SEBELUM write apa pun, window tetap di 150,130 480×320).
+
+**Rollback path** (`SizeAfterPositionFailed`): tidak dapat diuji runtime tanpa memaksa AX menolak size-write setelah position-write diterima (tidak ada switch AX publik untuk itu). Kontrak yang diterapkan: preflight finite/positive → save geometri awal → tulis posisi → tulis ukuran → jika ukuran ditolak: restore posisi awal + verifikasi read-back → error menyatakan eksplisit bila rollback gagal. Murni-fungsi yang mendasarinya (validasi, keputusan fallback, mapping errno) teruji unit.
+
+**Leak fix** (P2-3): jalur sukses `main_window()` melepas ref aplikasi setelah window di-transfer ke `AxWindow` — kini ter-verifikasi code path (setiap panggilan sukses melepas `app` tepat sekali).
 
 ---
 
@@ -129,6 +147,17 @@ nonexistent-exit=4
 | Host/OS exact + workspaces disabled tercatat | ✅ | §1; tidak ada kode Spaces di crate |
 | Tidak ada private API / dependensi baru / global loop / startup service | ✅ | FFI hanya ApplicationServices + CoreFoundation public; dependensi cuma layout-core |
 
+### Review upstream (arena.ai) — semua temuan ditangani
+
+| Temuan | Status | Perbaikan |
+|---|---|---|
+| P1: `set_window_frame` partial-mutation | ✅ | Preflight finite/positive (`InvalidGeometry`, live-tested §5) + save-before-write + rollback posisi dengan verifikasi read-back + `SizeAfterPositionFailed` eksplisit |
+| P1: crate macOS tanpa gating di workspace | ✅ | `platform-macos` dikeluarkan dari `members` (§4); command workspace tetap Windows-safe; crate memakai `[workspace]` kosong (standalone) |
+| P2: leak CF ref di jalur sukses `main_window()` | ✅ | `CFRelease(app)` setelah window transfer; semua path keluar kini melepas `app` tepat sekali |
+| P2: fallback AXWindows tidak untuk error AX | ✅ | `is_missing_main_window`: noValue/attributeUnsupported → fallback; permission/stale/cannotComplete/illegal tetap propagasi |
+| P2: langkah reproduksi merujuk file yang tidak ada di branch | ✅ | §8 diperbaiki (ambil harness dari branch spike via `git show`) |
+| P2: `kill(pid,0)` menyamakan EPERM dengan mati | ✅ | Cek errno: hanya ESRCH → stale; EPERM/EFOTHER → hidup, AX surfacing error asli |
+
 ---
 
 ## 7. Keterbatasan jujur
@@ -144,11 +173,26 @@ nonexistent-exit=4
 ```
 git clone https://github.com/Niumination/hypr-rust && cd hypr-rust
 git checkout macos/tahoe-ax-adapter-m1
-MACOSX_DEPLOYMENT_TARGET=26.0 cargo build -p hypr-rust-platform-macos --bin ax-probe
-# spawn target (Swift harness disposable, branch spike/macos-spike-1):
-swiftc -O spikes/macos/spike-macos.swift -o /tmp/spike-macos && /tmp/spike-macos spawn-target &
-./target/debug/ax-probe frame <pid>        # baca
+
+# workspace commands (Windows-safe; layout-core only)
+cargo fmt --check
+MACOSX_DEPLOYMENT_TARGET=26.0 cargo clippy --workspace --all-targets -- -D warnings
+MACOSX_DEPLOYMENT_TARGET=26.0 cargo test --workspace
+
+# macOS-only crate (standalone, outside workspace members)
+cargo fmt --manifest-path crates/platform-macos/Cargo.toml --check
+MACOSX_DEPLOYMENT_TARGET=26.0 cargo clippy --manifest-path crates/platform-macos/Cargo.toml --all-targets -- -D warnings
+cd crates/platform-macos
+MACOSX_DEPLOYMENT_TARGET=26.0 cargo test                    # 5/5
+MACOSX_DEPLOYMENT_TARGET=26.0 cargo build --bin ax-probe    # binary: crates/platform-macos/target/debug/ax-probe
+
+# spawn target: Swift harness lives on the spike branch, not this one
+git show spike/macos-spike-1:spikes/macos/spike-macos.swift > /tmp/spike-macos.swift
+swiftc -O /tmp/spike-macos.swift -o /tmp/spike-macos && /tmp/spike-macos spawn-target &
+
+./target/debug/ax-probe frame <pid>            # baca
 ./target/debug/ax-probe set-frame <pid> 120 120 420 312
+./target/debug/ax-probe set-frame <pid> nan 0 100 100   # ditolak: invalid geometry
 ./target/debug/ax-probe raise <pid>
-kill <pid>; ./target/debug/ax-probe frame <pid>   # exit 4
+kill <pid>; ./target/debug/ax-probe frame <pid>          # exit 4
 ```
