@@ -9,4 +9,7 @@ mod geometry;
 mod layout;
 
 pub use geometry::Rect;
-pub use layout::{compute_layout, LayoutConfig, LayoutError, LayoutKind, Placement, WindowId};
+pub use layout::{
+    compute_layout, compute_layout_constrained, ConstrainedWindow, LayoutConfig, LayoutDiagnostic,
+    LayoutError, LayoutKind, LayoutResult, Placement, WindowConstraints, WindowId,
+};

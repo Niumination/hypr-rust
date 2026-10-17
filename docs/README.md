@@ -40,7 +40,7 @@ The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md)
 
 ## Current implementation state
 
-The workspace now contains a platform-neutral layout-core scaffold and a native spike protocol. It is **not yet a usable desktop app**: Windows/macOS adapters, tray/menu-bar UI, settings UI, global hotkeys, packaging and native workspace implementation are outstanding. The scaffold has not been compiled here because `rustc`/`cargo` were unavailable in the authoring environment; see the root `README.md` and have CI/your machine run the stated commands.
+The workspace contains a platform-neutral layout-core (deterministic BSP / master-stack / monocle / columns / rows planner, now with per-window minimum-size constraints, a documented clamp-and-report overflow policy, and golden + property-style tests) plus the macOS native spike evidence. The scaffold compiles and passes its test suite on this machine (macOS 26.7.1, Intel, Rust 1.98.1); see `docs/PLATFORM-SPIKES.md`. It is **not yet a usable desktop app**: Windows/macOS adapters, tray/menu-bar UI, settings UI, global hotkeys, packaging and native workspace implementation are outstanding.
 
 ## Definition of success for the first usable release
 
