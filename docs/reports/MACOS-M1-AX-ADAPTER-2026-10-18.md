@@ -39,7 +39,7 @@ Tambahan manual (per SYSTEM-INFO-COLLECTION.md langkah 4):
 | System-reported (`system_profiler`) | Model Identifier **MacBookPro16,2** ("MacBook Pro") |
 | CPU (owner + system) | Intel i5-10310U (konsisten ThinkPad X13 Yoga Gen 1) |
 
-Spike #1 melaporkan host sebagai "Intel MacBook Pro 13-inch class" — **imprecise** (identifier sebenarnya MacBookPro16,2 = MacBook Pro 14" 2019) dan **bertabrakan** dengan klaim owner. CPU i5-10310U konsisten dengan ThinkPad X13 Yoga Gen 1; model identifier kemungkinan dilaporkan oleh firmware/EFI (SMBIOS), bukan label perangkat fisik. Laporan ini mencatat kedua nilai tanpa menyembunyikan konflik. Tidak ada serial/UUID/EFI config yang dibaca (dilarang).
+Spike #1 melaporkan host sebagai "Intel MacBook Pro 13-inch class" — **imprecise** (identifier sebenarnya MacBookPro16,2 = MacBook Pro 14" 2019) dan **bertabrakan** dengan klaim owner. CPU i5-10310U konsisten dengan ThinkPad X13 Yoga Gen 1; model identifier ternyata **spoof SMBIOS OpenCore** (`SystemProductName = MacBookPro16,2` di `EFI/oc/config.plist`, dibaca read-only 2026-10-18; serial/UUID tidak dibaca). Host = **Hackintosh**: OpenCore EFI + kext stack Acidanthera/Voodoo + SSDT laptop di perangkat fisik ThinkPad X13 Yoga Gen 1. Bukti lengkap: `docs/USER-DEVICE-PROFILE.md` §"Host identity — confirmed Hackintosh".
 
 ---
 
