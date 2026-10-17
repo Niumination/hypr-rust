@@ -58,7 +58,7 @@ Required set—test each operation independently, then as an end-to-end workflow
 **Spike 0 — environment record (17 Oct 2026):**
 
 - Date / tester / source branch + commit: 2026-10-17 / OpenCode agent (via owner instruction) / `spike/macos-spike-1` @ `d2fc8ed`
-- Machine model and CPU: Intel MacBook Pro 13" class, Intel(R) Core(TM) i5-10310U @ 1.70 GHz (x86_64)
+- Machine model and CPU: **REKONSILIASI 2026-10-18** — label lama "Intel MacBook Pro 13" class" (imprecise) diganti dengan bukti sistem: `system_profiler` melaporkan Model Identifier **MacBookPro16,2** (MacBook Pro 14" 2019) sementara owner melaporkan perangkat fisik **Lenovo ThinkPad X13 Yoga Gen 1**; CPU i5-10310U konsisten dengan ThinkPad. Kemungkinan model identifier dilaporkan firmware/EFI (SMBIOS), bukan label perangkat fisik. Kedua nilai dicatat; tidak ada serial/UUID/EFI config dibaca. Lihat `docs/reports/MACOS-M1-AX-ADAPTER-2026-10-18.md` §1.
 - OS edition, exact version/build: macOS 26.7.1, Build 25G241 (satisfies "Intel macOS 13+" floor; note: primary reference build was Ventura 13)
 - Display topology, resolution and scale/DPI: 1 display, 1920×1080 @ 1.0x (main)
 - App build and signing identity: ad-hoc unsigned CLI built with `swiftc -O` (Swift 6.3.3, CommandLineTools), run from terminal host
