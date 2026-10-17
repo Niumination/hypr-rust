@@ -93,6 +93,37 @@ Required set—test each operation independently, then as an end-to-end workflow
 **Exact macOS version/build, Intel model and signing identity:** macOS 26.7.1 (25G241) · i5-10310U x86_64 · ad-hoc unsigned CLI (`swiftc -O`, Swift 6.3.3)
 **Permission state and known limitations:** Accessibility GRANTED to host; single 1920×1080 @1.0x display; probable single-Space machine (chord test inconclusive but decision does not depend on it — no public targeted-switch API exists either way); Dock ineligible-probe inconclusive; multi-display/mixed-DPI untested.
 
+## Spike rerun — reproducibility (17 Oct 2026, session 2)
+
+Rerun of Spike 0/1/2 on the same machine to confirm reproducibility. Harness unchanged (`spikes/macos/spike-macos`, binary `spikes/macos/spike-macos`). Toolchain re-verified first: `cargo fmt --check` OK, `cargo clippy --workspace --all-targets -- -D warnings` clean, `cargo test --workspace` 6/6 PASS @ `d2fc8ed`.
+
+**Spike 0 — environment record (rerun):**
+
+- Date / branch + commit: 2026-10-17 (15:41 UTC) / `spike/macos-spike-1` @ `a2d899b`
+- OS/build/arch/CPU: macOS 26.7.1 (25G241), x86_64, Intel i5-10310U @ 1.70 GHz — identical to spike #1
+- Display: 1 display, 1920×1080 @ 1.0x (main) — identical
+- Permission: Accessibility GRANTED (`AXIsProcessTrusted`) — identical
+- Discovery: 4 layer-0 on-screen windows (Firefox, Nicegram Desktop, kitty, Finder) — read-only, titles not printed
+
+**Spike 1 — rerun result: PASS (identical to spike #1)**
+
+| Case | Result |
+|---|---|
+| Target spawn (`HYPR-SPIKE-TARGET`) | PASS — AX tree accessible, 1 window |
+| Read frame | PASS — (100,668) 420×312 |
+| Move ×3 set/read | PASS — (120,120) / (180,140) / (150,130) read back exactly |
+| Resize | PASS — 480×320 read back 480×320 |
+| Focus request (kAXRaise) | PASS |
+| Stale handle (target killed, then probe) | PASS — clean "NOT ACCESSIBLE / 0 windows", exit 0, no hang |
+
+**Spike 2 — rerun result: unchanged (NOT AVAILABLE / DISABLED)**
+
+- `space-observe` 40s: NO EVENT (observer silent; no public means to force a Space change on this machine)
+- `space-switch` Ctrl+→ then Ctrl+←: chords posted; no Space change observed; detect/move remain NOT AVAILABLE via public API
+- Decision stands: native workspaces `DISABLED` on macOS — rerun did not change any conclusion
+
+**Reproducibility verdict:** spike #1 results reproduce exactly on the same machine/build. No new information; no decision change.
+
 ## Evidence and handoff rules
 
 - Prefer concise text logs, API documentation links and reproducible steps. Redact app titles/user data.
