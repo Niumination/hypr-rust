@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "hypr-rust-layout-core"
 version = "0.1.0"
+
+[[package]]
+name = "hypr-rust-platform-macos"
+version = "0.1.0"
+dependencies = [
+ "hypr-rust-layout-core",
+]

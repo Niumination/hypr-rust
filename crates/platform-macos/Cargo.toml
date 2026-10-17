@@ -1,0 +1,7 @@
+[package]
+name = "hypr-rust-platform-macos"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hypr-rust-layout-core = { path = "../layout-core" }

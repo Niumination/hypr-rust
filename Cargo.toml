@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/layout-core"]
+members = ["crates/layout-core", "crates/platform-macos"]
 
 [workspace.package]
 edition = "2021"
