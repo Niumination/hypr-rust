@@ -4,7 +4,7 @@
 
 ## Project boundary
 
-Hypr-Rust is planned as a Rust tiling window manager/controller for Windows 11 x64 and Intel macOS Ventura 13+. It is not a Wayland compositor port. Native workspaces are conditional: the required support set is detecting active/target desktop, switching, moving the focused window, and observing/reporting changes. Never emulate workspace behavior by hiding/minimizing windows.
+Hypr-Rust is planned as a Rust tiling window manager/controller. The immediate test host, per owner clarification, is a ThinkPad X13 Yoga Gen 1 (Intel i5-10310U) dual-booting Windows and macOS Tahoe 26.7.1. The current milestone focuses on a narrow macOS Accessibility adapter proof on that exact host; Windows native work is deferred until the next Windows boot. This does not establish support for Apple-branded Macs or other macOS versions. The product is not a Wayland compositor port. macOS native workspaces remain disabled; never emulate them by hiding/minimizing windows.
 
 ## Repository map
 
@@ -12,6 +12,9 @@ Hypr-Rust is planned as a Rust tiling window manager/controller for Windows 11 x
 - `docs/` — PRD, architecture, roadmap, quality plan, REA research method and ADRs.
 - `docs/PLATFORM-SPIKES.md` — native test protocol and results template for the Windows and Intel Mac machines.
 - `docs/AGENT-HANDOFF.md` — branch-by-branch OpenCode/Hermes workflow and platform-specific task prompts.
+- `docs/USER-DEVICE-PROFILE.md` — current machine, validation boundary and reconciliations needed.
+- `docs/MACOS-TAHOE-NEXT-STAGE.md` — focused M1 Rust AX adapter task, safety gate and agent prompt.
+- `docs/SYSTEM-INFO-COLLECTION.md` and `scripts/collect-macos-env.sh` — read-only system details for reproducible reports.
 - `AGENTS.md` — instructions for OpenCode, Hermes Agent and other coding agents.
 
 ## Build and test
@@ -38,6 +41,9 @@ This repository snapshot was authored in an environment without `rustc`/`cargo`;
 ## Read first
 
 - [Documentation index](docs/README.md)
-- [Product requirements](docs/PRD.md)
+- [Current device profile](docs/USER-DEVICE-PROFILE.md)
+- [macOS Tahoe next stage](docs/MACOS-TAHOE-NEXT-STAGE.md)
+- [Read-only system information collection](docs/SYSTEM-INFO-COLLECTION.md)
 - [Platform spike plan](docs/PLATFORM-SPIKES.md)
+- [Agent handoff plan](docs/AGENT-HANDOFF.md)
 - [Agent workflow and project rules](AGENTS.md)
