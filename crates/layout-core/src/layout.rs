@@ -103,17 +103,23 @@ pub fn compute_layout(
         }
         LayoutKind::Columns => {
             let rects = partition(work_area, windows.len(), config.inner_gap, Axis::X)?;
-            result.extend(windows.iter().copied().zip(rects).map(|(window, rect)| Placement {
-                window,
-                rect,
-            }));
+            result.extend(
+                windows
+                    .iter()
+                    .copied()
+                    .zip(rects)
+                    .map(|(window, rect)| Placement { window, rect }),
+            );
         }
         LayoutKind::Rows => {
             let rects = partition(work_area, windows.len(), config.inner_gap, Axis::Y)?;
-            result.extend(windows.iter().copied().zip(rects).map(|(window, rect)| Placement {
-                window,
-                rect,
-            }));
+            result.extend(
+                windows
+                    .iter()
+                    .copied()
+                    .zip(rects)
+                    .map(|(window, rect)| Placement { window, rect }),
+            );
         }
     }
 
@@ -247,9 +253,12 @@ fn bsp(
     }
 
     let first_count = windows.len().div_ceil(2);
-    let second_count = windows.len() - first_count;
     let ratio = first_count as f64 / windows.len() as f64;
-    let axis = if depth % 2 == 0 { Axis::X } else { Axis::Y };
+    let axis = if depth.is_multiple_of(2) {
+        Axis::X
+    } else {
+        Axis::Y
+    };
     let (first, second) = split(area, gap, ratio, axis)?;
 
     bsp(first, &windows[..first_count], depth + 1, gap, result)?;
@@ -335,16 +344,28 @@ mod tests {
     fn tiled_layouts_do_not_overlap_and_monocle_is_explicitly_overlapping() {
         let bounds = Rect::new(-1920.0, 0.0, 1920.0, 1080.0);
         let ids = windows(6);
-        for kind in [LayoutKind::Bsp, LayoutKind::MasterStack, LayoutKind::Columns, LayoutKind::Rows] {
+        for kind in [
+            LayoutKind::Bsp,
+            LayoutKind::MasterStack,
+            LayoutKind::Columns,
+            LayoutKind::Rows,
+        ] {
             let placements = compute_layout(bounds, &ids, kind, test_config()).unwrap();
             for left in 0..placements.len() {
                 for right in left + 1..placements.len() {
-                    assert!(placements[left].rect.intersection_area(placements[right].rect) < 1e-8);
+                    assert!(
+                        placements[left]
+                            .rect
+                            .intersection_area(placements[right].rect)
+                            < 1e-8
+                    );
                 }
             }
         }
         let placements = compute_layout(bounds, &ids, LayoutKind::Monocle, test_config()).unwrap();
-        assert!(placements.windows(2).all(|pair| pair[0].rect == pair[1].rect));
+        assert!(placements
+            .windows(2)
+            .all(|pair| pair[0].rect == pair[1].rect));
     }
 
     #[test]
@@ -365,11 +386,21 @@ mod tests {
     fn rejects_duplicate_ids_and_invalid_bounds() {
         let bounds = Rect::new(0.0, 0.0, 800.0, 600.0);
         assert_eq!(
-            compute_layout(bounds, &[WindowId(1), WindowId(1)], LayoutKind::Rows, test_config()),
+            compute_layout(
+                bounds,
+                &[WindowId(1), WindowId(1)],
+                LayoutKind::Rows,
+                test_config()
+            ),
             Err(LayoutError::DuplicateWindowId)
         );
         assert_eq!(
-            compute_layout(Rect::new(0.0, 0.0, f64::NAN, 600.0), &[], LayoutKind::Rows, test_config()),
+            compute_layout(
+                Rect::new(0.0, 0.0, f64::NAN, 600.0),
+                &[],
+                LayoutKind::Rows,
+                test_config()
+            ),
             Err(LayoutError::InvalidBounds)
         );
     }
@@ -381,7 +412,12 @@ mod tests {
             ..test_config()
         };
         assert_eq!(
-            compute_layout(Rect::new(0.0, 0.0, 800.0, 600.0), &windows(1), LayoutKind::Bsp, config),
+            compute_layout(
+                Rect::new(0.0, 0.0, 800.0, 600.0),
+                &windows(1),
+                LayoutKind::Bsp,
+                config
+            ),
             Err(LayoutError::InsufficientSpace)
         );
     }
