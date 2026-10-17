@@ -163,14 +163,9 @@ func runTests(pid: pid_t) {
     let raiseErr = AXUIElementPerformAction(win, kAXRaiseAction as CFString)
     print("focus request (kAXRaiseAction): \(raiseErr == .success ? "PASS" : "FAIL (\(raiseErr.rawValue))")")
 
-    // Denied/ineligible probe: attempt to mutate the Dock's AX tree (system app; expect refusal).
-    if let dockPid = (NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first)?.processIdentifier,
-       let dockWin = axWindows(dockPid).first {
-        let denied = axSetPoint(dockWin, kAXPositionAttribute, CGPoint(x: 0, y: 0))
-        Thread.sleep(forTimeInterval: 0.2)
-        let unchanged = axPoint(dockWin, kAXPositionAttribute) == axPoint(dockWin, kAXPositionAttribute)
-        print("ineligible probe (Dock window move attempt): rejected-by-system=\(denied ? "NO (accepted?!) — review" : "YES") \(unchanged ? "" : "")")
-    }
+    // No Dock/system-UI mutation: probes mutate only the self-owned target.
+    // (Dock AX-move probe removed per M1 stage instruction — system apps must
+    // never be mutated by a probe.)
 
     print("summary: move\(allMoved ? " PASS" : " FAIL") resize\(resizeOk ? " PASS" : " FAIL") — ordinary window management via AX \(allMoved && resizeOk ? "PASS" : "PARTIAL/FAIL")")
 }
