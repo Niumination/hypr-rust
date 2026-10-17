@@ -12,7 +12,24 @@
 - **Immediate priority:** macOS window-management vertical slice on the user's current macOS installation
 - **Deferred for now:** Windows native adapter and Windows runtime spike; retain portable architecture and prepare Windows task/docs, but do not block macOS progress on them
 
-These are currently owner-reported facts, not independently collected evidence. The macOS spike report in the upstream repo describes the host as an “Intel MacBook Pro 13-inch class”; that conflicts with this clarification. Reconcile the report using the exact system model/identifier collected by `scripts/collect-macos-env.sh` before the report is treated as reproducible hardware evidence.
+### Host identity — confirmed Hackintosh (2026-10-18)
+
+The macOS installation on this ThinkPad is a **Hackintosh**: macOS running on non-Apple hardware via an EFI bootloader with a spoofed SMBIOS model identifier. Evidence (read-only; no serials/UUIDs/EFI configs recorded):
+
+| Signal | Value | Why it matters |
+|---|---|---|
+| `hw.model` / system_profiler | `MacBookPro16,2` | SMBIOS-reported model (14" MacBook Pro 2019) |
+| CPU | Intel i5-10310U (Ice Lake, 10th-gen U-series) | MacBookPro16,2 shipped 8th-gen Coffee Lake — mismatch |
+| GPU | Intel UHD Graphics 620 only, no Radeon | MacBookPro16,2 has Radeon Pro dGPU — mismatch |
+| Loaded kexts | Lilu 1.7.3, VirtualSMC 1.3.8, WhateverGreen 1.7.0, RestrictEvents 1.1.7 | Acidanthera/OpenCore-only kexts; real Apple hardware never loads these |
+| Input kexts | VoodooI2C + VoodooGPIO + VoodooInput + PS2Controller/PS2Trackpad/PS2Keyboard | ThinkPad I2C touchpad + PS/2 keyboard/trackpoint |
+| Audio kext | VoodooHDA 3.1.2 | codec driver for non-Apple audio |
+| EFI partition | FAT32 "NO NAME", 104.9 MB, `firmware-abi = EFI64` | typical OpenCore EFI layout |
+| Disk layout | EFI + MSR + "Windows X-Lite" (107 GB) | dual-OS setup, matches owner report |
+
+EFI `config.plist` was inspected read-only (mounted by owner): OpenCore `SystemProductName = MacBookPro16,2` — deliberate SMBIOS spoof. Serial/UUID/MLB values were NOT read or recorded (house rule). OpenCore layout confirmed: `EFI/oc/` (OpenCore.efi, config.plist, ACPI/, Kexts/, Drivers/, Tools/), `EFI/Boot/BOOTx64.efi`, `EFI/Microsoft/` (Windows dual-boot). ACPI folder holds laptop SSDTs (EC, USBX, PNLF, PLUG, XOSI, SBUS...); Kexts folder matches the loaded-kext list above; Drivers are standard OpenCore (HfsPlus, OpenRuntime, OpenCanopy, ResetNvramEntry). Consequence: macOS Tahoe here runs under Apple's "For use on Apple-branded Systems" license heading; legal/product review required before any distribution/support claim (see scope distinction 5). The earlier "Intel MacBook Pro 13-inch class" label in the spike record was imprecise and has been reconciled.
+
+These are verified system facts, not assumptions. The macOS spike report in the upstream repo describes the host as an “Intel MacBook Pro 13-inch class”; that conflict is resolved by the evidence above.
 
 ## Scope distinction
 
