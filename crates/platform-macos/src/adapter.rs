@@ -78,13 +78,30 @@ pub enum AxError {
     /// Frame geometry is not writable: non-finite coordinate/size or
     /// non-positive size. Rejected before any write.
     InvalidGeometry,
+    /// The position write was rejected before anything was applied. A full
+    /// restore was still attempted and verified; `actual` is the best-known
+    /// frame after the restore (None if it could not be read).
+    PositionWriteFailed {
+        source: Box<AxError>,
+        rollback_restored: bool,
+        actual: Option<Rect>,
+    },
     /// The size write was rejected after the position write had already
-    /// been applied. The original position was restored (or the restore
-    /// failed — `rollback_restored` says which), so the caller knows the
-    /// window is (or is not) left in a partial state.
+    /// been applied. The saved geometry was restored (or the restore failed —
+    /// `rollback_restored` says which); `actual` is the best-known frame after
+    /// the restore (None if it could not be read).
     SizeAfterPositionFailed {
         source: Box<AxError>,
         rollback_restored: bool,
+        actual: Option<Rect>,
+    },
+    /// Both writes were accepted, but the final read-back errored. A full
+    /// restore was attempted; `actual` is the best-known frame after the
+    /// restore (None if it could not be read).
+    VerificationReadFailed {
+        source: Box<AxError>,
+        rollback_restored: bool,
+        actual: Option<Rect>,
     },
     /// Both writes were accepted, but the read-back geometry did not match
     /// the request. The saved geometry was rolled back (or the rollback
@@ -110,19 +127,53 @@ impl fmt::Display for AxError {
             Self::InvalidGeometry => {
                 write!(f, "invalid geometry (non-finite or non-positive size)")
             }
+            Self::PositionWriteFailed {
+                source,
+                rollback_restored: true,
+                ..
+            } => write!(
+                f,
+                "position write rejected ({source}); original geometry restored"
+            ),
+            Self::PositionWriteFailed {
+                source,
+                rollback_restored: false,
+                ..
+            } => write!(
+                f,
+                "position write rejected ({source}); ROLLBACK FAILED - window state unverified"
+            ),
             Self::SizeAfterPositionFailed {
                 source,
                 rollback_restored: true,
+                ..
             } => write!(
                 f,
-                "size write rejected after position applied ({source}); original position restored"
+                "size write rejected after position applied ({source}); original geometry restored"
             ),
             Self::SizeAfterPositionFailed {
                 source,
                 rollback_restored: false,
+                ..
             } => write!(
                 f,
                 "size write rejected after position applied ({source}); ROLLBACK FAILED - window left at new position with old size"
+            ),
+            Self::VerificationReadFailed {
+                source,
+                rollback_restored: true,
+                ..
+            } => write!(
+                f,
+                "read-back failed after writes ({source}); original geometry restored"
+            ),
+            Self::VerificationReadFailed {
+                source,
+                rollback_restored: false,
+                ..
+            } => write!(
+                f,
+                "read-back failed after writes ({source}); ROLLBACK FAILED - window state unverified"
             ),
             Self::VerificationFailed {
                 expected,
@@ -213,12 +264,95 @@ pub fn process_alive(pid: u32) -> bool {
 }
 
 /// Validate frame geometry before any write, using the shared core
-/// validator (finite, positive size).
+/// validator (finite coordinates, positive finite size, finite right/bottom).
 fn validate_frame_rect(rect: Rect) -> Result<(), AxError> {
     if rect.is_finite_and_positive() {
         Ok(())
     } else {
         Err(AxError::InvalidGeometry)
+    }
+}
+
+/// Injectable frame-operations seam. The real adapter implements this with
+/// AX FFI; unit tests implement it with scripted outcomes (no Apple
+/// frameworks) so the transaction contract can be verified without a Mac.
+trait FrameOps {
+    /// Read the current frame of the window owned by `el`.
+    fn read_frame(&self, el: ffi::AXUIElementRef) -> Result<Rect, AxError>;
+    /// Write the window position.
+    fn write_position(&self, el: ffi::AXUIElementRef, x: f64, y: f64) -> Result<(), AxError>;
+    /// Write the window size.
+    fn write_size(&self, el: ffi::AXUIElementRef, w: f64, h: f64) -> Result<(), AxError>;
+}
+
+/// Full-frame rollback: restore position AND size to `before`, then verify by
+/// reading back. Returns (whether the restore was verified, best-known frame
+/// after the restore — None if it could not be read).
+fn restore_full_frame<O: FrameOps>(
+    ops: &O,
+    el: ffi::AXUIElementRef,
+    before: Rect,
+) -> (bool, Option<Rect>) {
+    let _ = ops.write_position(el, before.x, before.y);
+    let _ = ops.write_size(el, before.width, before.height);
+    match ops.read_frame(el) {
+        Ok(r) => (frames_match(before, r, K_FRAME_TOLERANCE), Some(r)),
+        Err(_) => (false, None),
+    }
+}
+
+/// Transaction contract for a verified frame move/resize. Every post-mutation
+/// failure attempts a full-frame rollback and reports the outcome; the caller
+/// never sees a silent partial state. On success the verified frame is
+/// returned so the CLI needs no extra (unhandled) post-transaction read.
+fn set_window_frame_txn<O: FrameOps>(
+    ops: &O,
+    el: ffi::AXUIElementRef,
+    rect: Rect,
+) -> Result<Rect, AxError> {
+    validate_frame_rect(rect)?;
+    // Save first: if anything below fails, this is the rollback target.
+    let before = ops.read_frame(el)?;
+
+    if let Err(source) = ops.write_position(el, rect.x, rect.y) {
+        // Position write rejected before anything was applied; still attempt a
+        // full restore + verify so the reported state is never a guess.
+        let (restored, actual) = restore_full_frame(ops, el, before);
+        return Err(AxError::PositionWriteFailed {
+            source: Box::new(source),
+            rollback_restored: restored,
+            actual,
+        });
+    }
+    if let Err(source) = ops.write_size(el, rect.width, rect.height) {
+        let (restored, actual) = restore_full_frame(ops, el, before);
+        return Err(AxError::SizeAfterPositionFailed {
+            source: Box::new(source),
+            rollback_restored: restored,
+            actual,
+        });
+    }
+    // Both writes accepted: verify by read-back within tolerance.
+    match ops.read_frame(el) {
+        Ok(actual) => {
+            if frames_match(rect, actual, K_FRAME_TOLERANCE) {
+                return Ok(actual);
+            }
+            let (restored, _) = restore_full_frame(ops, el, before);
+            Err(AxError::VerificationFailed {
+                expected: rect,
+                actual,
+                rollback_restored: restored,
+            })
+        }
+        Err(source) => {
+            let (restored, actual) = restore_full_frame(ops, el, before);
+            Err(AxError::VerificationReadFailed {
+                source: Box::new(source),
+                rollback_restored: restored,
+                actual,
+            })
+        }
     }
 }
 
@@ -259,6 +393,22 @@ impl Drop for AxWindow {
 /// [`MacAxAdapter::connect`] which enforces the Accessibility permission gate.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MacAxAdapter;
+
+impl FrameOps for MacAxAdapter {
+    fn read_frame(&self, el: ffi::AXUIElementRef) -> Result<Rect, AxError> {
+        let (x, y) = self.copy_point(el, k_ax_position_attribute())?;
+        let (w, h) = self.copy_size(el, k_ax_size_attribute())?;
+        Ok(Rect::new(x, y, w, h))
+    }
+
+    fn write_position(&self, el: ffi::AXUIElementRef, x: f64, y: f64) -> Result<(), AxError> {
+        self.write_point(el, k_ax_position_attribute(), x, y)
+    }
+
+    fn write_size(&self, el: ffi::AXUIElementRef, w: f64, h: f64) -> Result<(), AxError> {
+        self.write_size(el, k_ax_size_attribute(), w, h)
+    }
+}
 
 impl MacAxAdapter {
     /// Connect, failing with [`AxError::PermissionDenied`] when the process
@@ -365,71 +515,22 @@ impl MacAxAdapter {
 
     /// Move and resize the window with a no-partial-mutation contract:
     ///
-    /// 1. Preflight: geometry must be finite with positive size
-    ///    ([`AxError::InvalidGeometry`] otherwise — nothing is written).
+    /// 1. Preflight: geometry must be finite with positive size and finite
+    ///    right/bottom ([`AxError::InvalidGeometry`] otherwise — nothing is
+    ///    written).
     /// 2. The current geometry is saved before the first write.
-    /// 3. Position is written, then size. If the size write is rejected,
-    ///    the saved position is restored and verified by read-back
-    ///    ([`AxError::SizeAfterPositionFailed`]).
-    /// 4. After both writes are accepted, the frame is read back and
-    ///    compared within tolerance. On mismatch the saved geometry is
-    ///    fully restored (position + size) and verified; the error
-    ///    ([`AxError::VerificationFailed`]) reports the expected frame, the
-    ///    actually observed frame, and whether the rollback succeeded.
-    pub fn set_window_frame(&self, window: &AxWindow, rect: Rect) -> Result<(), AxError> {
-        validate_frame_rect(rect)?;
-        // Save first: if anything below fails, this is the rollback target.
-        let before = self.window_frame(window)?;
-        self.write_point(window.element(), k_ax_position_attribute(), rect.x, rect.y)?;
-        if let Err(source) = self.write_size(
-            window.element(),
-            k_ax_size_attribute(),
-            rect.width,
-            rect.height,
-        ) {
-            // Rollback: restore the saved position, then verify by reading
-            // the frame back. Restore failure is reported, not hidden.
-            let _ = self.write_point(
-                window.element(),
-                k_ax_position_attribute(),
-                before.x,
-                before.y,
-            );
-            return Err(AxError::SizeAfterPositionFailed {
-                source: Box::new(source),
-                rollback_restored: self.restored(window, before),
-            });
-        }
-        // Both writes accepted: verify by read-back within tolerance.
-        let actual = self.window_frame(window)?;
-        if frames_match(rect, actual, K_FRAME_TOLERANCE) {
-            return Ok(());
-        }
-        // Mismatch: roll back to the saved geometry (position + size).
-        let _ = self.write_point(
-            window.element(),
-            k_ax_position_attribute(),
-            before.x,
-            before.y,
-        );
-        let _ = self.write_size(
-            window.element(),
-            k_ax_size_attribute(),
-            before.width,
-            before.height,
-        );
-        Err(AxError::VerificationFailed {
-            expected: rect,
-            actual,
-            rollback_restored: self.restored(window, before),
-        })
-    }
-
-    /// Check whether the window frame now matches `target` within tolerance.
-    fn restored(&self, window: &AxWindow, target: Rect) -> bool {
-        self.window_frame(window)
-            .map(|r| frames_match(target, r, K_FRAME_TOLERANCE))
-            .unwrap_or(false)
+    /// 3. Position is written, then size. If either write is rejected, the
+    ///    saved geometry is fully restored (position + size) and verified.
+    /// 4. After both writes are accepted, the frame is read back and compared
+    ///    within tolerance. On read-back error or mismatch the saved geometry
+    ///    is fully restored and verified.
+    /// 5. Every post-mutation failure returns a typed error preserving the
+    ///    original cause, the rollback status, and the best-known observed
+    ///    frame — a partial state is never hidden.
+    ///
+    /// On success the verified frame is returned.
+    pub fn set_window_frame(&self, window: &AxWindow, rect: Rect) -> Result<Rect, AxError> {
+        set_window_frame_txn(self, window.element(), rect)
     }
 
     /// Request window raise (focus request). Explicit user-visible action;
@@ -588,6 +689,7 @@ struct CGSize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[test]
     fn ax_error_codes_map_to_distinct_variants() {
@@ -620,13 +722,15 @@ mod tests {
         let rolled_back = AxError::SizeAfterPositionFailed {
             source: Box::new(AxError::Unsupported),
             rollback_restored: true,
+            actual: None,
         };
         assert!(rolled_back
             .to_string()
-            .contains("original position restored"));
+            .contains("original geometry restored"));
         let not_restored = AxError::SizeAfterPositionFailed {
             source: Box::new(AxError::Unsupported),
             rollback_restored: false,
+            actual: None,
         };
         assert!(not_restored.to_string().contains("ROLLBACK FAILED"));
     }
@@ -693,5 +797,287 @@ mod tests {
             Rect::new(100.0, 668.0, 420.0, 315.0),
             1.0
         ));
+    }
+
+    // MARK: - Transaction contract (mock FrameOps; no Apple frameworks)
+
+    /// Scripted mock of [`FrameOps`] for unit tests. The first read is the
+    /// save; subsequent reads are the read-back (and rollback verify). Write
+    /// failures are controlled per-scenario; `fail_writes_after` fails any
+    /// write once that many writes have succeeded (to simulate rollback-write
+    /// failure).
+    struct MockOps {
+        frame: Cell<Rect>,
+        read_override: Option<Rect>,
+        fail_read_back: bool,
+        fail_rollback_read: bool,
+        fail_position: bool,
+        fail_size: bool,
+        fail_writes_after: Option<usize>,
+        writes: std::cell::RefCell<Vec<String>>,
+        reads: Cell<usize>,
+        position_failed: Cell<bool>,
+        size_failed: Cell<bool>,
+    }
+
+    impl MockOps {
+        fn new(frame: Rect) -> Self {
+            Self {
+                frame: Cell::new(frame),
+                read_override: None,
+                fail_read_back: false,
+                fail_rollback_read: false,
+                fail_position: false,
+                fail_size: false,
+                fail_writes_after: None,
+                writes: std::cell::RefCell::new(Vec::new()),
+                reads: Cell::new(0),
+                position_failed: Cell::new(false),
+                size_failed: Cell::new(false),
+            }
+        }
+
+        fn write_log(&self) -> Vec<String> {
+            self.writes.borrow().clone()
+        }
+    }
+
+    impl FrameOps for MockOps {
+        fn read_frame(&self, _el: ffi::AXUIElementRef) -> Result<Rect, AxError> {
+            let n = self.reads.get();
+            self.reads.set(n + 1);
+            if n == 1 {
+                // First read-back.
+                if self.fail_read_back {
+                    return Err(AxError::Failure(-25204));
+                }
+                if let Some(r) = self.read_override {
+                    return Ok(r);
+                }
+            }
+            if n >= 2 && self.fail_rollback_read {
+                // Rollback verify read.
+                return Err(AxError::Failure(-25204));
+            }
+            Ok(self.frame.get())
+        }
+
+        fn write_position(&self, _el: ffi::AXUIElementRef, x: f64, y: f64) -> Result<(), AxError> {
+            if self.fail_position && !self.position_failed.get() {
+                self.position_failed.set(true);
+                return Err(AxError::Failure(-25200));
+            }
+            if self
+                .fail_writes_after
+                .is_some_and(|t| self.writes.borrow().len() >= t)
+            {
+                return Err(AxError::Failure(-25200));
+            }
+            self.writes.borrow_mut().push("position".to_string());
+            let f = self.frame.get();
+            self.frame.set(Rect::new(x, y, f.width, f.height));
+            Ok(())
+        }
+
+        fn write_size(&self, _el: ffi::AXUIElementRef, w: f64, h: f64) -> Result<(), AxError> {
+            if self.fail_size && !self.size_failed.get() {
+                self.size_failed.set(true);
+                return Err(AxError::Failure(-25200));
+            }
+            if self
+                .fail_writes_after
+                .is_some_and(|t| self.writes.borrow().len() >= t)
+            {
+                return Err(AxError::Failure(-25200));
+            }
+            self.writes.borrow_mut().push("size".to_string());
+            let f = self.frame.get();
+            self.frame.set(Rect::new(f.x, f.y, w, h));
+            Ok(())
+        }
+    }
+
+    const EL: ffi::AXUIElementRef = ptr::null();
+
+    #[test]
+    fn invalid_geometry_causes_zero_writes() {
+        let ops = MockOps::new(Rect::new(0.0, 0.0, 100.0, 50.0));
+        let rect = Rect::new(f64::NAN, 0.0, 100.0, 50.0);
+        let err = set_window_frame_txn(&ops, EL, rect).unwrap_err();
+        assert_eq!(err, AxError::InvalidGeometry);
+        assert!(ops.write_log().is_empty());
+        // Zero-size also rejected before any write.
+        let err = set_window_frame_txn(&ops, EL, Rect::new(0.0, 0.0, 0.0, 50.0)).unwrap_err();
+        assert_eq!(err, AxError::InvalidGeometry);
+        assert!(ops.write_log().is_empty());
+    }
+
+    #[test]
+    fn success_returns_verified_frame() {
+        let target = Rect::new(120.0, 120.0, 420.0, 312.0);
+        let ops = MockOps::new(Rect::new(100.0, 668.0, 420.0, 312.0));
+        let verified = set_window_frame_txn(&ops, EL, target).unwrap();
+        assert_eq!(verified, target);
+        assert_eq!(ops.write_log(), vec!["position", "size"]);
+    }
+
+    #[test]
+    fn position_write_failure_attempts_full_rollback() {
+        let before = Rect::new(100.0, 668.0, 420.0, 312.0);
+        let mut ops = MockOps::new(before);
+        ops.fail_position = true;
+        let err =
+            set_window_frame_txn(&ops, EL, Rect::new(120.0, 120.0, 420.0, 312.0)).unwrap_err();
+        match err {
+            AxError::PositionWriteFailed {
+                source,
+                rollback_restored,
+                actual,
+            } => {
+                assert_eq!(*source, AxError::Failure(-25200));
+                assert!(rollback_restored);
+                assert_eq!(actual, Some(before));
+            }
+            other => panic!("expected PositionWriteFailed, got {other:?}"),
+        }
+        // The failed position write is not logged; rollback restores position + size.
+        assert_eq!(ops.write_log(), vec!["position", "size"]);
+    }
+
+    #[test]
+    fn size_write_failure_attempts_full_rollback() {
+        let before = Rect::new(100.0, 668.0, 420.0, 312.0);
+        let mut ops = MockOps::new(before);
+        ops.fail_size = true;
+        let err =
+            set_window_frame_txn(&ops, EL, Rect::new(120.0, 120.0, 420.0, 312.0)).unwrap_err();
+        match err {
+            AxError::SizeAfterPositionFailed {
+                source,
+                rollback_restored,
+                actual,
+            } => {
+                assert_eq!(*source, AxError::Failure(-25200));
+                assert!(rollback_restored);
+                assert_eq!(actual, Some(before));
+            }
+            other => panic!("expected SizeAfterPositionFailed, got {other:?}"),
+        }
+        // position applied, size failed, rollback restores position + size.
+        assert_eq!(ops.write_log(), vec!["position", "position", "size"]);
+    }
+
+    #[test]
+    fn read_back_error_attempts_full_rollback() {
+        let before = Rect::new(100.0, 668.0, 420.0, 312.0);
+        let mut ops = MockOps::new(before);
+        ops.fail_read_back = true;
+        let err =
+            set_window_frame_txn(&ops, EL, Rect::new(120.0, 120.0, 420.0, 312.0)).unwrap_err();
+        match err {
+            AxError::VerificationReadFailed {
+                source,
+                rollback_restored,
+                actual,
+            } => {
+                assert_eq!(*source, AxError::Failure(-25204));
+                assert!(rollback_restored);
+                assert_eq!(actual, Some(before));
+            }
+            other => panic!("expected VerificationReadFailed, got {other:?}"),
+        }
+        // writes: position, size (applied) + rollback position, size.
+        assert_eq!(
+            ops.write_log(),
+            vec!["position", "size", "position", "size"]
+        );
+    }
+
+    #[test]
+    fn read_back_mismatch_attempts_full_rollback() {
+        let before = Rect::new(100.0, 668.0, 420.0, 312.0);
+        let target = Rect::new(120.0, 120.0, 420.0, 312.0);
+        let mut ops = MockOps::new(before);
+        // Read-back reports a frame that does not match the request.
+        ops.read_override = Some(Rect::new(999.0, 999.0, 420.0, 312.0));
+        let err = set_window_frame_txn(&ops, EL, target).unwrap_err();
+        match err {
+            AxError::VerificationFailed {
+                expected,
+                actual,
+                rollback_restored,
+            } => {
+                assert_eq!(expected, target);
+                assert_eq!(actual, Rect::new(999.0, 999.0, 420.0, 312.0));
+                assert!(rollback_restored);
+            }
+            other => panic!("expected VerificationFailed, got {other:?}"),
+        }
+        // writes: position, size (applied) + rollback position, size.
+        assert_eq!(
+            ops.write_log(),
+            vec!["position", "size", "position", "size"]
+        );
+    }
+
+    #[test]
+    fn rollback_write_failure_is_reported_not_restored() {
+        let before = Rect::new(100.0, 668.0, 420.0, 312.0);
+        let target = Rect::new(120.0, 120.0, 420.0, 312.0);
+        let mut ops = MockOps::new(before);
+        // Read-back mismatches, then the rollback writes fail.
+        ops.read_override = Some(Rect::new(999.0, 999.0, 420.0, 312.0));
+        ops.fail_writes_after = Some(2); // fail writes once 2 have succeeded
+        let err = set_window_frame_txn(&ops, EL, target).unwrap_err();
+        match err {
+            AxError::VerificationFailed {
+                rollback_restored,
+                actual,
+                ..
+            } => {
+                assert!(!rollback_restored);
+                // actual is the observed mismatch (not the post-rollback frame).
+                assert_eq!(actual, Rect::new(999.0, 999.0, 420.0, 312.0));
+            }
+            other => panic!("expected VerificationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rollback_read_failure_is_reported_not_restored() {
+        let before = Rect::new(100.0, 668.0, 420.0, 312.0);
+        let target = Rect::new(120.0, 120.0, 420.0, 312.0);
+        let mut ops = MockOps::new(before);
+        // Read-back mismatches; rollback writes succeed but the verify read
+        // fails (best-known frame = None).
+        ops.read_override = Some(Rect::new(999.0, 999.0, 420.0, 312.0));
+        ops.fail_rollback_read = true;
+        let err = set_window_frame_txn(&ops, EL, target).unwrap_err();
+        match err {
+            AxError::VerificationFailed {
+                rollback_restored,
+                actual,
+                ..
+            } => {
+                assert!(!rollback_restored);
+                assert_eq!(actual, Rect::new(999.0, 999.0, 420.0, 312.0));
+            }
+            other => panic!("expected VerificationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tolerance_boundary_behavior() {
+        let target = Rect::new(120.0, 120.0, 420.0, 312.0);
+        // Exactly at tolerance -> match.
+        let mut ops = MockOps::new(Rect::new(100.0, 668.0, 420.0, 312.0));
+        ops.read_override = Some(Rect::new(121.0, 120.0, 420.0, 312.0));
+        let verified = set_window_frame_txn(&ops, EL, target).unwrap();
+        assert_eq!(verified, Rect::new(121.0, 120.0, 420.0, 312.0));
+        // Just beyond tolerance -> mismatch + rollback.
+        let mut ops = MockOps::new(Rect::new(100.0, 668.0, 420.0, 312.0));
+        ops.read_override = Some(Rect::new(121.5, 120.0, 420.0, 312.0));
+        let err = set_window_frame_txn(&ops, EL, target).unwrap_err();
+        assert!(matches!(err, AxError::VerificationFailed { .. }));
     }
 }

@@ -6,11 +6,14 @@
 //!   or prints window titles.
 //! - `set-frame` / `raise` are MUTATING and require `--target <pid>
 //!   --token <hex>`. The token must match the registration file the Swift
-//!   spike harness writes at `/tmp/hypr-rust-target.json` (perm 0600) when
-//!   it spawns the self-owned `HYPR-SPIKE-TARGET` fixture. Before any AX
-//!   mutation the probe verifies: file exists, permissions are 0600, pid and
-//!   token match, and the pid is alive. Anything else fails with exit 5
-//!   (`unregistered target`) — a probe cannot mutate an arbitrary pid.
+//!   spike harness writes at `~/.hypr-rust/fixture-target.json` (owner-only,
+//!   regular, non-symlink, perm 0600). Before any AX mutation the probe
+//!   verifies: file exists, is a regular non-symlink file owned by the
+//!   current user with perm 0600, pid and token match, the pid is alive, and
+//!   the fixture liveness lock (`~/.hypr-rust/fixture.lock`) is held by a
+//!   live process (so a stale record or reused PID cannot authorize
+//!   mutation). Anything else fails with exit 5 (`unregistered target`) — a
+//!   probe cannot mutate an arbitrary pid.
 //!
 //! Usage:
 //!   ax-probe frame <pid>
@@ -25,15 +28,25 @@ use std::process::ExitCode;
 use hypr_rust_platform_macos::{process_alive, AxError, MacAxAdapter};
 use layout_core::Rect;
 
-/// Target registration file written by the Swift spike harness
-/// (spikes/macos/spike-macos.swift, `spawn-target`). Must stay 0600.
-const TARGET_FILE: &str = "/tmp/hypr-rust-target.json";
+/// Fixture directory (owner-only) under the user's home.
+fn fixture_dir() -> Result<std::path::PathBuf, ()> {
+    let home = std::env::var("HOME").map_err(|_| ())?;
+    Ok(std::path::PathBuf::from(home).join(".hypr-rust"))
+}
+
+fn registration_path() -> Result<std::path::PathBuf, ()> {
+    Ok(fixture_dir()?.join("fixture-target.json"))
+}
+
+fn lock_path() -> Result<std::path::PathBuf, ()> {
+    Ok(fixture_dir()?.join("fixture.lock"))
+}
 
 /// Probe-level errors: adapter failures plus the registration failure.
 enum ProbeError {
     Ax(AxError),
-    /// Token verification failed: target is not the registered self-owned
-    /// fixture. Mutations are refused before any AX call.
+    /// Token/identity verification failed: target is not the registered
+    /// self-owned fixture. Mutations are refused before any AX call.
     TargetUnregistered,
 }
 
@@ -48,7 +61,7 @@ fn main() -> ExitCode {
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(ProbeError::TargetUnregistered) => {
-            eprintln!("error: unregistered target (token verification failed)");
+            eprintln!("error: unregistered target (fixture identity verification failed)");
             eprintln!("       mutations require --target <pid> --token <hex> from the harness");
             ExitCode::from(5)
         }
@@ -117,19 +130,10 @@ fn run(args: &[String]) -> Result<(), ProbeError> {
                         return Err(ProbeError::Ax(AxError::IllegalArgument));
                     }
                     let rect = Rect::new(nums[0], nums[1], nums[2], nums[3]);
-                    adapter.set_window_frame(&window, rect)?;
-                    // Defense-in-depth read-back (the adapter already verifies
-                    // internally; this catches a race between verify and now).
-                    let after = adapter.window_frame(&window)?;
-                    if (after.x - rect.x).abs() > 1.0
-                        || (after.y - rect.y).abs() > 1.0
-                        || (after.width - rect.width).abs() > 1.0
-                        || (after.height - rect.height).abs() > 1.0
-                    {
-                        eprintln!("error: read-back mismatch after set-frame: {after:?}");
-                        return Err(ProbeError::Ax(AxError::Failure(-25204)));
-                    }
-                    print_frame(&after);
+                    // The adapter verifies by read-back internally and returns
+                    // the verified frame; no extra post-transaction read here.
+                    let verified = adapter.set_window_frame(&window, rect)?;
+                    print_frame(&verified);
                     Ok(())
                 }
                 _ => {
@@ -147,11 +151,10 @@ fn run(args: &[String]) -> Result<(), ProbeError> {
     }
 }
 
-/// Parse `--target <pid> --token <hex>` for mutation commands.
+/// Parse `--target <pid> --token <hex>` for mutation commands. Missing or
+/// malformed target identity is an unregistered-target failure (exit 5):
+/// the command must fail before any AX mutation can even be considered.
 fn parse_target_args(args: &[String]) -> Result<(u32, String), ProbeError> {
-    // Missing or malformed target identity is an unregistered-target
-    // failure (exit 5): the command must fail before any AX mutation can
-    // even be considered.
     let mut pid: Option<u32> = None;
     let mut token: Option<String> = None;
     let mut i = 2;
@@ -180,18 +183,27 @@ fn parse_target_args(args: &[String]) -> Result<(u32, String), ProbeError> {
     }
 }
 
-/// Verify the target registration file written by the Swift harness:
-/// exists, perm 0600, contains matching pid + token, pid alive.
+/// Verify the fixture registration end-to-end (fail closed on any problem):
+/// file exists, is a regular non-symlink file owned by the current user with
+/// perm 0600, contains matching pid + token, pid is alive, and the fixture
+/// liveness lock is held by a live process.
 fn verify_target_registration(pid: u32, token: &str) -> Result<(), ProbeError> {
-    let path = std::path::Path::new(TARGET_FILE);
-    let meta = std::fs::metadata(path).map_err(|_| ProbeError::TargetUnregistered)?;
-    // Permission check: must be exactly 0600 (owner-only).
-    use std::os::unix::fs::PermissionsExt;
-    let mode = meta.permissions().mode() & 0o777;
-    if mode != 0o600 {
+    let path = registration_path().map_err(|_| ProbeError::TargetUnregistered)?;
+    let meta = std::fs::symlink_metadata(&path).map_err(|_| ProbeError::TargetUnregistered)?;
+    // Must be a regular file, NOT a symlink (lstat, no symlink following).
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
         return Err(ProbeError::TargetUnregistered);
     }
-    let body = std::fs::read_to_string(path).map_err(|_| ProbeError::TargetUnregistered)?;
+    // Owner-only: uid must match the current user, perms exactly 0600.
+    use hypr_rust_platform_macos::ffi::getuid;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if meta.uid() != unsafe { getuid() } {
+        return Err(ProbeError::TargetUnregistered);
+    }
+    if meta.permissions().mode() & 0o777 != 0o600 {
+        return Err(ProbeError::TargetUnregistered);
+    }
+    let body = std::fs::read_to_string(&path).map_err(|_| ProbeError::TargetUnregistered)?;
     let (file_pid, file_token) = parse_registration(&body).ok_or(ProbeError::TargetUnregistered)?;
     if file_pid != pid || file_token != token {
         return Err(ProbeError::TargetUnregistered);
@@ -199,6 +211,32 @@ fn verify_target_registration(pid: u32, token: &str) -> Result<(), ProbeError> {
     if !process_alive(pid) {
         return Err(ProbeError::Ax(AxError::StaleTarget));
     }
+    verify_fixture_lock()?;
+    Ok(())
+}
+
+/// Verify the fixture liveness lock is held by a live process. If the probe
+/// can acquire the exclusive lock, no live fixture holds it (stale record or
+/// reused PID) -> reject. This is the process-instance identity check.
+fn verify_fixture_lock() -> Result<(), ProbeError> {
+    use hypr_rust_platform_macos::ffi::{close, flock, open, LOCK_EX, LOCK_NB, O_RDWR};
+    let lock = lock_path().map_err(|_| ProbeError::TargetUnregistered)?;
+    let cstr = std::ffi::CString::new(lock.as_os_str().as_encoded_bytes())
+        .map_err(|_| ProbeError::TargetUnregistered)?;
+    // SAFETY: cstr is a valid NUL-terminated C string.
+    let fd = unsafe { open(cstr.as_ptr(), O_RDWR, 0o600) };
+    if fd < 0 {
+        return Err(ProbeError::TargetUnregistered);
+    }
+    // SAFETY: fd is a valid open file descriptor.
+    let ret = unsafe { flock(fd, LOCK_EX | LOCK_NB) };
+    // SAFETY: fd is a valid open file descriptor; closed once here.
+    unsafe { close(fd) };
+    if ret == 0 {
+        // Lock was free -> no live fixture -> reject.
+        return Err(ProbeError::TargetUnregistered);
+    }
+    // Lock held by a live fixture -> ok.
     Ok(())
 }
 

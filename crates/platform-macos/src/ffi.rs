@@ -24,6 +24,13 @@ pub const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 pub const K_AX_VALUE_CG_POINT_TYPE: c_int = 1;
 pub const K_AX_VALUE_CG_SIZE_TYPE: c_int = 2;
 
+// open(2) flags (fcntl.h).
+pub const O_RDWR: c_int = 0x0002;
+pub const O_CREAT: c_int = 0x0200;
+// flock(2) operations (sys/file.h).
+pub const LOCK_EX: c_int = 0x02;
+pub const LOCK_NB: c_int = 0x04;
+
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     /// True when the current process holds Accessibility permission.
@@ -90,6 +97,22 @@ extern "C" {
     /// the calling thread's errno value; read immediately after a failing
     /// syscall.
     pub fn __error() -> *mut c_int;
+
+    /// Open a file (open(2)). Safety: `path` must be a valid NUL-terminated
+    /// C string; `flags`/`mode` follow POSIX open(2). Returns the fd or -1.
+    pub fn open(path: *const c_char, flags: c_int, mode: u32) -> c_int;
+
+    /// Close a file descriptor (close(2)). Safety: `fd` must be a valid open
+    /// file descriptor.
+    pub fn close(fd: c_int) -> c_int;
+
+    /// Current user id (getuid(2)). Safety: no arguments, no state.
+    pub fn getuid() -> u32;
+
+    /// Apply/release an advisory lock on an open file (flock(2)). Safety:
+    /// `fd` must be a valid open file descriptor. Returns 0 on success, -1 on
+    /// error (with errno set, e.g. EWOULDBLOCK for a non-blocking conflict).
+    pub fn flock(fd: c_int, operation: c_int) -> c_int;
 
     /// Number of elements in a CFArray. Safety: `array` live CFArrayRef.
     pub fn CFArrayGetCount(array: CFTypeRef) -> isize;

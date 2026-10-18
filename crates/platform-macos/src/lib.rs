@@ -7,7 +7,7 @@
 //! `unsafe` is confined to `ffi.rs` (raw declarations) and `adapter.rs`
 //! (documented wrappers); no other module contains unsafe blocks.
 
-mod adapter;
-mod ffi;
+pub mod adapter;
+pub mod ffi;
 
 pub use adapter::{map_ax_error, process_alive, AxError, AxWindow, MacAxAdapter};
