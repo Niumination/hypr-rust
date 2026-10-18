@@ -10,4 +10,4 @@
 mod adapter;
 mod ffi;
 
-pub use adapter::{map_ax_error, AxError, AxWindow, MacAxAdapter};
+pub use adapter::{map_ax_error, process_alive, AxError, AxWindow, MacAxAdapter};

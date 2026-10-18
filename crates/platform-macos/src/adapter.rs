@@ -63,7 +63,7 @@ fn k_ax_raise_action() -> ffi::CFStringRef {
 
 /// Typed failure modes. Every AXError code maps to exactly one variant so the
 /// executor can branch on the real cause instead of a generic failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AxError {
     /// Process lacks Accessibility permission (or AX API disabled).
     PermissionDenied,
@@ -84,6 +84,15 @@ pub enum AxError {
     /// window is (or is not) left in a partial state.
     SizeAfterPositionFailed {
         source: Box<AxError>,
+        rollback_restored: bool,
+    },
+    /// Both writes were accepted, but the read-back geometry did not match
+    /// the request. The saved geometry was rolled back (or the rollback
+    /// failed — see flag); `actual` reports the observed frame so a partial
+    /// state is never hidden.
+    VerificationFailed {
+        expected: Rect,
+        actual: Rect,
         rollback_restored: bool,
     },
     /// Any other AXError code, carried verbatim.
@@ -114,6 +123,22 @@ impl fmt::Display for AxError {
             } => write!(
                 f,
                 "size write rejected after position applied ({source}); ROLLBACK FAILED - window left at new position with old size"
+            ),
+            Self::VerificationFailed {
+                expected,
+                actual,
+                rollback_restored: true,
+            } => write!(
+                f,
+                "read-back mismatch (expected {expected:?}, actual {actual:?}); original geometry restored"
+            ),
+            Self::VerificationFailed {
+                expected,
+                actual,
+                rollback_restored: false,
+            } => write!(
+                f,
+                "read-back mismatch (expected {expected:?}, actual {actual:?}); ROLLBACK FAILED - window left at unverified state"
             ),
             Self::Failure(code) => write!(f, "AX failure (code {code})"),
         }
@@ -164,16 +189,33 @@ fn is_missing_main_window(code: i32) -> bool {
     matches!(code, -25212 | -25205) // noValue | attributeUnsupported
 }
 
-/// Validate frame geometry before any write: finite coordinates and
-/// positive, finite size.
+/// AX reports integer-ish points; allow a small tolerance when verifying
+/// read-back geometry against a requested frame.
+const K_FRAME_TOLERANCE: f64 = 1.0;
+
+/// Frame comparison with tolerance.
+fn frames_match(expected: Rect, actual: Rect, tolerance: f64) -> bool {
+    (actual.x - expected.x).abs() <= tolerance
+        && (actual.y - expected.y).abs() <= tolerance
+        && (actual.width - expected.width).abs() <= tolerance
+        && (actual.height - expected.height).abs() <= tolerance
+}
+
+/// Liveness check for `pid` (kill with sig 0 + errno: only ESRCH means
+/// dead; EPERM means alive-but-not-ours). Exported for the probe binary,
+/// which must not mutate a pid that was never registered as a fixture.
+pub fn process_alive(pid: u32) -> bool {
+    // SAFETY: kill with sig 0 sends no signal; standard POSIX check.
+    // SAFETY: __error is the thread-local errno pointer (libSystem).
+    let ret = unsafe { ffi::kill(pid as std::os::raw::c_int, 0) };
+    let errno = unsafe { *ffi::__error() };
+    process_alive_from_kill(ret, errno)
+}
+
+/// Validate frame geometry before any write, using the shared core
+/// validator (finite, positive size).
 fn validate_frame_rect(rect: Rect) -> Result<(), AxError> {
-    if rect.x.is_finite()
-        && rect.y.is_finite()
-        && rect.width.is_finite()
-        && rect.height.is_finite()
-        && rect.width > 0.0
-        && rect.height > 0.0
-    {
+    if rect.is_finite_and_positive() {
         Ok(())
     } else {
         Err(AxError::InvalidGeometry)
@@ -327,14 +369,16 @@ impl MacAxAdapter {
     ///    ([`AxError::InvalidGeometry`] otherwise — nothing is written).
     /// 2. The current geometry is saved before the first write.
     /// 3. Position is written, then size. If the size write is rejected,
-    ///    the saved position is restored and verified by read-back; the
-    ///    error ([`AxError::SizeAfterPositionFailed`]) states explicitly
-    ///    whether the rollback succeeded, so a rejected operation never
-    ///    leaves the window changed without a clear report.
+    ///    the saved position is restored and verified by read-back
+    ///    ([`AxError::SizeAfterPositionFailed`]).
+    /// 4. After both writes are accepted, the frame is read back and
+    ///    compared within tolerance. On mismatch the saved geometry is
+    ///    fully restored (position + size) and verified; the error
+    ///    ([`AxError::VerificationFailed`]) reports the expected frame, the
+    ///    actually observed frame, and whether the rollback succeeded.
     pub fn set_window_frame(&self, window: &AxWindow, rect: Rect) -> Result<(), AxError> {
         validate_frame_rect(rect)?;
-        // Save first: if the size write fails after the position write
-        // lands, this is the rollback target.
+        // Save first: if anything below fails, this is the rollback target.
         let before = self.window_frame(window)?;
         self.write_point(window.element(), k_ax_position_attribute(), rect.x, rect.y)?;
         if let Err(source) = self.write_size(
@@ -345,23 +389,47 @@ impl MacAxAdapter {
         ) {
             // Rollback: restore the saved position, then verify by reading
             // the frame back. Restore failure is reported, not hidden.
-            let restore = self.write_point(
+            let _ = self.write_point(
                 window.element(),
                 k_ax_position_attribute(),
                 before.x,
                 before.y,
             );
-            let rollback_restored = restore.is_ok()
-                && self
-                    .window_frame(window)
-                    .map(|r| (r.x - before.x).abs() <= 1.0 && (r.y - before.y).abs() <= 1.0)
-                    .unwrap_or(false);
             return Err(AxError::SizeAfterPositionFailed {
                 source: Box::new(source),
-                rollback_restored,
+                rollback_restored: self.restored(window, before),
             });
         }
-        Ok(())
+        // Both writes accepted: verify by read-back within tolerance.
+        let actual = self.window_frame(window)?;
+        if frames_match(rect, actual, K_FRAME_TOLERANCE) {
+            return Ok(());
+        }
+        // Mismatch: roll back to the saved geometry (position + size).
+        let _ = self.write_point(
+            window.element(),
+            k_ax_position_attribute(),
+            before.x,
+            before.y,
+        );
+        let _ = self.write_size(
+            window.element(),
+            k_ax_size_attribute(),
+            before.width,
+            before.height,
+        );
+        Err(AxError::VerificationFailed {
+            expected: rect,
+            actual,
+            rollback_restored: self.restored(window, before),
+        })
+    }
+
+    /// Check whether the window frame now matches `target` within tolerance.
+    fn restored(&self, window: &AxWindow, target: Rect) -> bool {
+        self.window_frame(window)
+            .map(|r| frames_match(target, r, K_FRAME_TOLERANCE))
+            .unwrap_or(false)
     }
 
     /// Request window raise (focus request). Explicit user-visible action;
@@ -604,5 +672,26 @@ mod tests {
             validate_frame_rect(Rect::new(0.0, 0.0, 100.0, -1.0)),
             Err(AxError::InvalidGeometry)
         );
+    }
+
+    #[test]
+    fn frames_match_uses_tolerance() {
+        let expected = Rect::new(100.0, 668.0, 420.0, 312.0);
+        assert!(frames_match(expected, expected, 1.0));
+        assert!(frames_match(
+            expected,
+            Rect::new(100.5, 668.0, 419.5, 312.0),
+            1.0
+        ));
+        assert!(!frames_match(
+            expected,
+            Rect::new(102.0, 668.0, 420.0, 312.0),
+            1.0
+        ));
+        assert!(!frames_match(
+            expected,
+            Rect::new(100.0, 668.0, 420.0, 315.0),
+            1.0
+        ));
     }
 }
