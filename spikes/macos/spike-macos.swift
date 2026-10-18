@@ -229,6 +229,26 @@ func spaceSwitch(dir: String, pid: pid_t?, execute: Bool) {
 
 // MARK: - Controlled target window (our own app; never a user window)
 
+/// Register this process as the self-owned mutation target: write
+/// /tmp/hypr-rust-target.json (perm 0600) with {pid, token} and return the
+/// token. The Rust probe requires this token for mutation commands, so a
+/// probe can never mutate an arbitrary pid — only the registered fixture.
+func registerTargetFile() -> String? {
+    let token = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+    let path = "/tmp/hypr-rust-target.json"
+    let body = "{\"pid\":\(getpid()),\"token\":\"\(token)\"}"
+    let ok = FileManager.default.createFile(
+        atPath: path,
+        contents: body.data(using: .utf8),
+        attributes: [.posixPermissions: 0o600])
+    if !ok {
+        FileManager.default.createFile(atPath: path, contents: nil, attributes: nil)
+        try? body.data(using: .utf8)!.write(to: URL(fileURLWithPath: path))
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+    }
+    return token
+}
+
 func spawnTarget() {
     let app = NSApplication.shared
     app.setActivationPolicy(.regular)
@@ -240,6 +260,11 @@ func spawnTarget() {
     win.isReleasedWhenClosed = false
     win.makeKeyAndOrderFront(nil)
     app.activate(ignoringOtherApps: true)
+    if let token = registerTargetFile() {
+        print("target-token=\(token)")
+    } else {
+        FileHandle.standardError.write("warning: target token registration failed\n".data(using: .utf8)!)
+    }
     print("HYPR-SPIKE-TARGET pid=\(getpid()) frame=\(win.frame)")
     print("keep this process running while 'run-tests --pid \(getpid())' executes…")
     app.run()
