@@ -6,10 +6,17 @@
 //
 // Modes:
 //   record                 Spike 0 environment record + window discovery (read-only)
-//   spawn-target           Start a controlled target window; prints its PID and exits the printing, stays alive
-//   run-tests --pid <n>    Spike 1 mutations (move/resize/raise) against the given PID only
+//   spawn-target           Start a controlled target window; registers it as the
+//                          self-owned mutation fixture (token + liveness lock),
+//                          prints its PID and token, stays alive
 //   space-observe          Listen for NSWorkspace.activeSpaceDidChangeNotification (30 s)
 //   space-switch --dir right|left [--pid <n>]  Post public CGEvent Ctrl+Arrow, observe space change
+//
+// Mutation safety (M1 closeout): the Swift harness is a fixture spawner +
+// read-only probe ONLY. The old mutating `run-tests --pid` path was removed so
+// no Swift path mutates an arbitrary PID; the Rust `ax-probe` is the sole
+// mutator, gated by the fixture registration below. A normal command cannot
+// mutate Dock, Finder, system UI, or an unrelated user process.
 //
 // Rules honored (see AGENTS.md):
 // - No private APIs (no CGS/SkyLight). CGWindowList, AXUIElement, NSWorkspace, CGEvent are public.
@@ -121,55 +128,6 @@ func axSetSize(_ el: AXUIElement, _ name: String, _ s: CGSize) -> Bool {
     return AXUIElementSetAttributeValue(el, name as CFString, v) == .success
 }
 
-// MARK: - Spike 1 mutations (controlled target only)
-
-func runTests(pid: pid_t) {
-    print("== Spike 1 — mutations on controlled target pid=\(pid) ==")
-    guard AXIsProcessTrusted() else {
-        print("mutations: DENIED — Accessibility permission not granted to host process (AXIsProcessTrusted=false). This is the protocol's permission-denied case; move/resize/focus NOT VERIFIED on this machine until granted.")
-        exit(3)
-    }
-    let wins = axWindows(pid)
-    guard let win = wins.first else {
-        print("target AX tree: NOT ACCESSIBLE or no window (windows found: \(wins.count))"); exit(4)
-    }
-    print("target AX tree: ACCESSIBLE (windows: \(wins.count))")
-
-    guard let p0 = axPoint(win, kAXPositionAttribute), let s0 = axSize(win, kAXSizeAttribute) else {
-        print("read frame: FAIL"); exit(5)
-    }
-    print("read frame: PASS position=(\(Int(p0.x)),\(Int(p0.y))) size=\(Int(s0.width))x\(Int(s0.height))")
-
-    // Move x3 (repeatable, no feedback loop): deterministic offsets.
-    var allMoved = true
-    for (i, target) in [(120.0, 120.0), (180.0, 140.0), (150.0, 130.0)].enumerated() {
-        let ok = axSetPoint(win, kAXPositionAttribute, CGPoint(x: target.0, y: target.1))
-        Thread.sleep(forTimeInterval: 0.25)
-        let p = axPoint(win, kAXPositionAttribute)
-        let converged = ok && p != nil && abs(p!.x - target.0) < 2 && abs(p!.y - target.1) < 2
-        print("move[\(i)] set=(\(Int(target.0)),\(Int(target.1))) -> read=(\(p.map { "(\(Int($0.x)),\(Int($0.y)))" } ?? "nil")) \(converged ? "PASS" : "FAIL")")
-        allMoved = allMoved && converged
-    }
-
-    // Resize: set an explicit size, verify.
-    let newSize = CGSize(width: 480, height: 320)
-    let resized = axSetSize(win, kAXSizeAttribute, newSize)
-    Thread.sleep(forTimeInterval: 0.25)
-    let s = axSize(win, kAXSizeAttribute)
-    let resizeOk = resized && s != nil && abs(s!.width - newSize.width) < 4 && abs(s!.height - newSize.height) < 4
-    print("resize -> read=\(s.map { "\(Int($0.width))x\(Int($0.height))" } ?? "nil") \(resizeOk ? "PASS" : "FAIL")")
-
-    // Focus request: AXRaise (public action). Focus theft check = we only requested OUR target.
-    let raiseErr = AXUIElementPerformAction(win, kAXRaiseAction as CFString)
-    print("focus request (kAXRaiseAction): \(raiseErr == .success ? "PASS" : "FAIL (\(raiseErr.rawValue))")")
-
-    // No Dock/system-UI mutation: probes mutate only the self-owned target.
-    // (Dock AX-move probe removed per M1 stage instruction — system apps must
-    // never be mutated by a probe.)
-
-    print("summary: move\(allMoved ? " PASS" : " FAIL") resize\(resizeOk ? " PASS" : " FAIL") — ordinary window management via AX \(allMoved && resizeOk ? "PASS" : "PARTIAL/FAIL")")
-}
-
 // MARK: - Spike 2 — Spaces contract (public surface only)
 
 final class SpaceObserver {
@@ -227,31 +185,102 @@ func spaceSwitch(dir: String, pid: pid_t?, execute: Bool) {
     }
 }
 
-// MARK: - Controlled target window (our own app; never a user window)
+// MARK: - Fixture registration (lifecycle-bounded, owner-only, fail closed)
+//
+// The registration is a local test guard, not a multi-user security boundary.
+// It exists so the Rust probe cannot mutate an arbitrary pid — only the
+// registered self-owned fixture. Process-instance identity is provided by an
+// exclusive flock held by the fixture for its whole lifetime: the probe refuses
+// mutation unless the lock is held by a live process, so a stale record or a
+// reused PID cannot authorize mutation. (macOS exposes no public process
+// start-time API — proc_pidinfo/libproc is private and the sysctl extern_proc
+// layout is not in public headers — so the flock is the public, robust
+// process-instance identity here.)
 
-/// Register this process as the self-owned mutation target: write
-/// /tmp/hypr-rust-target.json (perm 0600) with {pid, token} and return the
-/// token. The Rust probe requires this token for mutation commands, so a
-/// probe can never mutate an arbitrary pid — only the registered fixture.
-func registerTargetFile() -> String? {
-    let token = UUID().uuidString.replacingOccurrences(of: "-", with: "")
-    let path = "/tmp/hypr-rust-target.json"
-    let body = "{\"pid\":\(getpid()),\"token\":\"\(token)\"}"
-    let ok = FileManager.default.createFile(
-        atPath: path,
-        contents: body.data(using: .utf8),
-        attributes: [.posixPermissions: 0o600])
-    if !ok {
-        FileManager.default.createFile(atPath: path, contents: nil, attributes: nil)
-        try? body.data(using: .utf8)!.write(to: URL(fileURLWithPath: path))
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
-    }
-    return token
+/// Owner-only directory holding the fixture lock + registration.
+func fixtureDir() -> String {
+    return NSHomeDirectory() + "/.hypr-rust"
 }
+
+/// Acquire the fixture liveness lock (held for the fixture's lifetime).
+/// Returns the open file descriptor, or nil on failure (fail closed).
+func acquireFixtureLock() -> Int32? {
+    let dir = fixtureDir()
+    do {
+        try FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+    } catch {
+        return nil
+    }
+    let lockPath = (dir as NSString).appendingPathComponent("fixture.lock")
+    let fd = open(lockPath, O_RDWR | O_CREAT, 0o600)
+    if fd < 0 { return nil }
+    if flock(fd, LOCK_EX) != 0 {
+        close(fd)
+        return nil
+    }
+    return fd
+}
+
+/// Atomically write the registration (temp + rename) with owner-only perms.
+/// Returns true on success (fail closed otherwise).
+func writeRegistration(token: String) -> Bool {
+    let dir = fixtureDir()
+    let regPath = (dir as NSString).appendingPathComponent("fixture-target.json")
+    let tmpPath = (dir as NSString).appendingPathComponent("fixture-target.json.tmp")
+    let body = "{\"pid\":\(getpid()),\"token\":\"\(token)\"}"
+    guard let data = body.data(using: .utf8) else { return false }
+    let fd = open(tmpPath, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+    if fd < 0 { return false }
+    defer { close(fd) }
+    guard data.withUnsafeBytes({ write(fd, $0.baseAddress, data.count) }) == data.count else {
+        unlink(tmpPath)
+        return false
+    }
+    fsync(fd)
+    if rename(tmpPath, regPath) != 0 {
+        unlink(tmpPath)
+        return false
+    }
+    return true
+}
+
+/// Remove the registration on normal termination. (Abrupt death releases the
+/// flock, so the probe rejects the stale record via the lock check.)
+func removeRegistration() {
+    let regPath = (fixtureDir() as NSString).appendingPathComponent("fixture-target.json")
+    let tmpPath = (fixtureDir() as NSString).appendingPathComponent("fixture-target.json.tmp")
+    try? FileManager.default.removeItem(atPath: regPath)
+    try? FileManager.default.removeItem(atPath: tmpPath)
+}
+
+// MARK: - Controlled target window (our own app; never a user window)
 
 func spawnTarget() {
     let app = NSApplication.shared
     app.setActivationPolicy(.regular)
+
+    // Fail closed: no lock and no registration -> do not expose a fixture.
+    guard let lockFD = acquireFixtureLock() else {
+        FileHandle.standardError.write("error: fixture lock acquisition failed\n".data(using: .utf8)!)
+        exit(5)
+    }
+    let token = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+    guard writeRegistration(token: token) else {
+        FileHandle.standardError.write("error: fixture registration failed\n".data(using: .utf8)!)
+        close(lockFD)
+        exit(5)
+    }
+
+    // Remove the registration on normal termination; the flock backstop covers
+    // abrupt termination.
+    NotificationCenter.default.addObserver(
+        forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { _ in
+            removeRegistration()
+            close(lockFD)
+    }
+
     let win = NSWindow(
         contentRect: NSRect(x: 100, y: 100, width: 420, height: 280),
         styleMask: [.titled, .resizable],
@@ -260,13 +289,11 @@ func spawnTarget() {
     win.isReleasedWhenClosed = false
     win.makeKeyAndOrderFront(nil)
     app.activate(ignoringOtherApps: true)
-    if let token = registerTargetFile() {
-        print("target-token=\(token)")
-    } else {
-        FileHandle.standardError.write("warning: target token registration failed\n".data(using: .utf8)!)
-    }
+
+    print("target-token=\(token)")
     print("HYPR-SPIKE-TARGET pid=\(getpid()) frame=\(win.frame)")
-    print("keep this process running while 'run-tests --pid \(getpid())' executes…")
+    print("fixture registered at ~/.hypr-rust/fixture-target.json (lock held for process lifetime)")
+    print("keep this process running while the Rust probe executes…")
     app.run()
     exit(0)
 }
@@ -287,14 +314,11 @@ case "record":
     discover()
 case "spawn-target":
     spawnTarget()
-case "run-tests":
-    guard let p = argValue("--pid"), let pid = pid_t(p) else { print("usage: run-tests --pid <pid>"); exit(1) }
-    runTests(pid: pid)
 case "space-observe":
     spaceObserve(seconds: Double(argValue("--seconds") ?? "30") ?? 30)
 case "space-switch":
     spaceSwitch(dir: argValue("--dir") ?? "right", pid: (argValue("--pid")).flatMap(pid_t.init),
                 execute: args.contains("--execute"))
 default:
-    print("modes: record | spawn-target | run-tests --pid <pid> | space-observe [--seconds n] | space-switch --dir right|left [--pid pid] [--execute]")
+    print("modes: record | spawn-target | space-observe [--seconds n] | space-switch --dir right|left [--pid pid] [--execute]")
 }
