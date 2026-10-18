@@ -1,7 +1,7 @@
 # Laporan Verifikasi — M1 Rust AX Adapter (macOS Tahoe)
 
 **Tanggal:** 18 Oktober 2026
-**Branch:** `macos/tahoe-ax-adapter-m1` @ `91e57e2`
+**Branch:** `macos/tahoe-ax-adapter-m1` @ `41a8867` (adapter code; this report + arena brief land in the following docs commit)
 **Scope:** `docs/MACOS-TAHOE-NEXT-STAGE.md` — Stage M1, macOS-only vertical slice
 **Metode:** implementasi + native run di host user (self-owned target window)
 
@@ -59,11 +59,12 @@ Catatan build: binary butuh `MACOSX_DEPLOYMENT_TARGET=26.0` (std Homebrew rustc 
 
 ## 3. Yang diimplementasi
 
-Crate baru `crates/platform-macos` (workspace member; dependensi: `hypr-rust-layout-core` saja, tanpa crate eksternal):
+Crate baru `crates/platform-macos` (standalone, **di luar** workspace members; dependensi: `hypr-rust-layout-core` saja, tanpa crate eksternal):
 
 - `src/ffi.rs` — satu-satunya deklarasi FFI mentah (ApplicationServices + CoreFoundation + `kill` libSystem). Semua `unsafe` di crate ini terkunci di sini + `adapter.rs` (wrapper berdokumentasi safety comment).
-- `src/adapter.rs` — API aman: `MacAxAdapter::{connect, main_window, window_frame, set_window_frame, raise}`; `AxError` (PermissionDenied / StaleTarget / Unsupported / IllegalArgument / NoWindows / Failure(code)); mapping kode AXError diverifikasi terhadap HIServices host (macOS 26.7.1): success 0 · failure -25200 · illegalArgument -25201 · invalidUIElement -25202 · cannotComplete -25204 · attributeUnsupported -25205 · actionUnsupported -25206 · notImplemented -25208 · apiDisabled -25211 · noValue -25212 · parameterizedAttributeUnsupported -25213 · notEnoughPrecision -25214.
-- `src/bin/ax-probe.rs` — CLI native test: `frame <pid>`, `set-frame <pid> x y w h` (dengan read-back verification ≤1pt), `raise <pid>`. Exit: 0 ok · 1 error · 3 permission denied · 4 stale target.
+- `src/adapter.rs` — API aman: `MacAxAdapter::{connect, main_window, window_frame, set_window_frame, raise}`; `AxError` (PermissionDenied / StaleTarget / Unsupported / IllegalArgument / NoWindows / InvalidGeometry / SizeAfterPositionFailed{source, rollback_restored} / VerificationFailed{expected, actual, rollback_restored} / Failure(code)); mapping kode AXError diverifikasi terhadap HIServices host (macOS 26.7.1): success 0 · failure -25200 · illegalArgument -25201 · invalidUIElement -25202 · cannotComplete -25204 · attributeUnsupported -25205 · actionUnsupported -25206 · notImplemented -25208 · apiDisabled -25211 · noValue -25212 · parameterizedAttributeUnsupported -25213 · notEnoughPrecision -25214.
+- `src/bin/ax-probe.rs` — CLI native test. `frame <pid>` read-only (bebas, tanpa token). `set-frame --target <pid> --token <hex> x y w h` dan `raise --target <pid> --token <hex>` **mutating**: wajib token yang cocok dengan `/tmp/hypr-rust-target.json` (perm 0600) yang ditulis harness spike; verifikasi (file ada, perm 0600, pid+token cocok, pid hidup) dilakukan SEBELUM mutasi AX. Exit: 0 ok · 1 error · 3 permission denied · 4 stale target · 5 unregistered target (gagal verifikasi token).
+- `frames_match(expected, actual, tolerance)` — pure fn perbandingan geometri dengan toleransi 1pt (unit-tested), dipakai di preflight rollback + read-back. Validasi geometri memakai `Rect::is_finite_and_positive()` dari `layout-core`.
 
 Temuan implementasi (jujur):
 - Konstanta SDK `kAXWindowsAttribute` dll adalah **macro `CFSTR("...")`**, bukan symbol ekspor — key dibuat sekali via `OnceLock` + `CFStringCreateWithCString`.
@@ -83,52 +84,60 @@ OK
 $ MACOSX_DEPLOYMENT_TARGET=26.0 cargo clippy --workspace --all-targets -- -D warnings
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.69s
 $ MACOSX_DEPLOYMENT_TARGET=26.0 cargo clippy --manifest-path crates/platform-macos/Cargo.toml --all-targets -- -D warnings
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.30s
 $ MACOSX_DEPLOYMENT_TARGET=26.0 cargo test --workspace
 test result: ok. 6 passed; 0 failed; ... (layout-core)
 $ cd crates/platform-macos && MACOSX_DEPLOYMENT_TARGET=26.0 cargo test
-test result: ok. 5 passed; 0 failed; ... (platform-macos: AXError mapping, Display, liveness ESRCH/EPERM, main-window fallback decision, frame validation)
+test result: ok. 6 passed; 0 failed; ... (platform-macos: AXError mapping, Display, liveness ESRCH/EPERM, main-window fallback decision, frame validation, frames_match tolerance)
 ```
 
-11/11 test hijau (6 workspace + 5 platform-macos).
+12/12 test hijau (6 workspace + 6 platform-macos).
 
 ---
 
 ## 5. Native run di host (verbatim)
 
-**Rerun 18 Okt 2026 (post-review, adapter fixed)** — target: self-owned `HYPR-SPIKE-TARGET` (window 420×312) di-spawn oleh Swift spike harness (disposable, versi Dock-fix @ `669e178`). Probe Rust hanya memutasi pid target eksplisit.
+**Rerun 18 Okt 2026 (post-review round 2, token-gated)** — target: self-owned `HYPR-SPIKE-TARGET` (window 420×312) di-spawn oleh Swift spike harness @ `5500727` (PR #1). Harness menulis `/tmp/hypr-rust-target.json` (perm 0600) berisi `{pid, token}` dan mencetak `target-token=<hex>`. Probe Rust hanya memutasi target yang token-nya terverifikasi.
 
 ```
-$ /tmp/spike-macos spawn-target &        # PID 10042
-$ ax-probe frame 10042
+$ /tmp/spike-macos spawn-target &        # PID 29466, token 098B41FF4F9C44C09E85A9D2F6792B05
+$ ls -la /tmp/hypr-rust-target.json
+-rw-------  1 zaryu  wheel  56 Oct 18 20:33 /tmp/hypr-rust-target.json
+$ ax-probe frame 29466
 ok {x: 100, y: 668, width: 420, height: 312}
-$ ax-probe set-frame 10042 120 120 420 312
+$ ax-probe set-frame 29466 120 120 420 312          # TANPA token
+error: unregistered target (token verification failed)
+       mutations require --target <pid> --token <hex> from the harness
+notoken-exit=5
+$ ax-probe raise 29466                                # TANPA token
+error: unregistered target (token verification failed)
+notoken-raise-exit=5
+$ ax-probe set-frame --target 29466 --token 098B41FF4F9C44C09E85A9D2F6792B05 120 120 420 312
 ok {x: 120, y: 120, width: 420, height: 312}
-$ ax-probe set-frame 10042 180 140 420 312
+$ ax-probe set-frame --target 29466 --token 098B41FF4F9C44C09E85A9D2F6792B05 180 140 420 312
 ok {x: 180, y: 140, width: 420, height: 312}
-$ ax-probe set-frame 10042 150 130 420 312
+$ ax-probe set-frame --target 29466 --token 098B41FF4F9C44C09E85A9D2F6792B05 150 130 420 312
 ok {x: 150, y: 130, width: 420, height: 312}
-$ ax-probe set-frame 10042 150 130 480 320
+$ ax-probe set-frame --target 29466 --token 098B41FF4F9C44C09E85A9D2F6792B05 150 130 480 320   # resize
 ok {x: 150, y: 130, width: 480, height: 320}
-$ ax-probe raise 10042
+$ ax-probe raise --target 29466 --token 098B41FF4F9C44C09E85A9D2F6792B05
 ok raised
-$ ax-probe set-frame 10042 nan 130 480 320
+$ ax-probe set-frame --target 29466 --token 098B41FF4F9C44C09E85A9D2F6792B05 nan 130 480 320
 error: invalid geometry (non-finite or non-positive size)
 invalid-exit=1
-$ ax-probe set-frame 10042 150 130 0 320
-error: invalid geometry (non-finite or non-positive size)
-zero-exit=1
-$ ax-probe frame 10042                  # window unchanged after rejects
+$ ax-probe frame 29466                  # window unchanged after rejects
 ok {x: 150, y: 130, width: 480, height: 320}
-$ kill 10042; sleep 1
-$ ax-probe frame 10042
+$ kill 29466; sleep 1
+$ ax-probe frame 29466
 error: stale target (process/window gone)
 stale-exit=4
 ```
 
-Rerun identik dengan run pertama (17 Okt) untuk semua operasi inti; validasi geometry kini live-terverifikasi (NaN dan zero-size ditolak SEBELUM write apa pun, window tetap di 150,130 480×320).
+**Token gate (F1)**: `set-frame`/`raise` tanpa `--target/--token`, atau dengan token yang tidak cocok file registrasi, gagal **exit 5** SEBELUM ada panggilan AX apa pun. Hanya pid+token yang terdaftar di `/tmp/hypr-rust-target.json` (0600, pid hidup) yang boleh dimutasi — probe tidak bisa memutasi pid arbitrer. `frame` tetap read-only dan bebas.
 
-**Rollback path** (`SizeAfterPositionFailed`): tidak dapat diuji runtime tanpa memaksa AX menolak size-write setelah position-write diterima (tidak ada switch AX publik untuk itu). Kontrak yang diterapkan: preflight finite/positive → save geometri awal → tulis posisi → tulis ukuran → jika ukuran ditolak: restore posisi awal + verifikasi read-back → error menyatakan eksplisit bila rollback gagal. Murni-fungsi yang mendasarinya (validasi, keputusan fallback, mapping errno) teruji unit.
+**Read-back verification (F2)**: setiap `set-frame` yang diterima AX dibaca balik geometrinya (toleransi 1pt). Cocok → `ok`; tidak cocok → geometri awal di-rollback penuh (posisi + ukuran) + diverifikasi, lalu error `VerificationFailed { expected, actual, rollback_restored }`. Di jalur ini semua set-frame terverifikasi cocok (read-back eksak).
+
+**Rollback path** (`SizeAfterPositionFailed`): tidak dapat diuji runtime tanpa memaksa AX menolak size-write setelah position-write diterima (tidak ada switch AX publik untuk itu). Kontrak yang diterapkan: preflight finite/positive → save geometri awal → tulis posisi → tulis ukuran → jika ukuran ditolak: restore posisi awal + verifikasi read-back → error menyatakan eksplisit bila rollback gagal. Murni-fungsi yang mendasarinya (`frames_match`, validasi, keputusan fallback, mapping errno) teruji unit.
 
 **Leak fix** (P2-3): jalur sukses `main_window()` melepas ref aplikasi setelah window di-transfer ke `AxWindow` — kini ter-verifikasi code path (setiap panggilan sukses melepas `app` tepat sekali).
 
@@ -139,8 +148,8 @@ Rerun identik dengan run pertama (17 Okt) untuk semua operasi inti; validasi geo
 | Kriteria | Status | Bukti |
 |---|---|---|
 | Baseline fmt/clippy/test + toolchain version | ✅ | §2, §4 |
-| Self-owned window discovered/read/moved/resized repeatedly, read-back within tolerance | ✅ | §5 (move×3 + resize, read-back eksak ≤1pt) |
-| Probe mutasi hanya target sendiri | ✅ | ax-probe operasi pada pid eksplisit; tidak ada enumerasi window user; tidak ada judul di log |
+| Self-owned window discovered/read/moved/resized repeatedly, read-back within tolerance | ✅ | §5 (move×3 + resize, read-back eksak ≤1pt, token-gated) |
+| Probe mutasi hanya target self-owned terdaftar (token) | ✅ | §5: `set-frame`/`raise` wajib token; tanpa token / token salah → exit 5 sebelum AX; hanya fixture self-owned; tidak ada enumerasi window user; tidak ada judul di log |
 | AX denied path exercised atau ditandai "not runtime tested" | ⚠️ **NOT RUNTIME TESTED** | Code path ada: `connect()` gate `AXIsProcessTrusted()` → `PermissionDenied` (exit 3). Host memegang AX trust; revoke butuh TCC reset + System Settings (merusak environment test). Ditandai jujur. |
 | Stale target: prompt, tanpa crash/hang/retry/false success | ✅ | §5: exit 4, error typed, <1s |
 | Log tanpa judul/serial/UUID/kredensial | ✅ | Output hanya angka geometry + pid |
@@ -157,6 +166,8 @@ Rerun identik dengan run pertama (17 Okt) untuk semua operasi inti; validasi geo
 | P2: fallback AXWindows tidak untuk error AX | ✅ | `is_missing_main_window`: noValue/attributeUnsupported → fallback; permission/stale/cannotComplete/illegal tetap propagasi |
 | P2: langkah reproduksi merujuk file yang tidak ada di branch | ✅ | §8 diperbaiki (ambil harness dari branch spike via `git show`) |
 | P2: `kill(pid,0)` menyamakan EPERM dengan mati | ✅ | Cek errno: hanya ESRCH → stale; EPERM/EFOTHER → hidup, AX surfacing error asli |
+| F1: mutasi `ax-probe` tidak terbatas ke target self-owned | ✅ | Token gate: `set-frame`/`raise` wajib `--target <pid> --token <hex>`; verifikasi file registrasi (0600, pid+token cocok, pid hidup) sebelum AX; gagal → exit 5 (live-tested §5). `frame` tetap read-only |
+| F2: `set_window_frame` tanpa verifikasi hasil | ✅ | Read-back dalam adapter (tol 1pt) → mismatch: rollback penuh + `VerificationFailed {expected, actual, rollback_restored}`; `frames_match` pure fn + unit test; validasi pakai `Rect::is_finite_and_positive()` core |
 
 ---
 
@@ -167,6 +178,8 @@ Rerun identik dengan run pertama (17 Okt) untuk semua operasi inti; validasi geo
 - `kill(pid,0)` existence check tidak kebal pid-reuse (probe short-lived; diterima).
 - Host: model identifier sistem (MacBookPro16,2) ≠ perangkat fisik owner (ThinkPad X13 Yoga) — lihat §1.
 - Windows 11: belum ada mesin target; klaim Windows menunggu native test.
+- Token gate adalah jaring keselamatan **uji** (fixture self-owned), bukan kontrol akses multi-user: file di `/tmp` milik owner, tanpa anti-forgery kuat. Tujuannya mencegah probe menimpa window lain, bukan menahan adversary.
+- Mismatch read-back (`VerificationFailed`) tidak bisa dipaksa runtime tanpa AX menolak/salah-set diam-diam (tidak ada switch AX publik); kontrak + `frames_match` teruji unit, jalur mismatch ditandai jujur belum live-tested.
 
 ## 8. Reproduksi
 
@@ -183,16 +196,20 @@ MACOSX_DEPLOYMENT_TARGET=26.0 cargo test --workspace
 cargo fmt --manifest-path crates/platform-macos/Cargo.toml --check
 MACOSX_DEPLOYMENT_TARGET=26.0 cargo clippy --manifest-path crates/platform-macos/Cargo.toml --all-targets -- -D warnings
 cd crates/platform-macos
-MACOSX_DEPLOYMENT_TARGET=26.0 cargo test                    # 5/5
+MACOSX_DEPLOYMENT_TARGET=26.0 cargo test                    # 6/6
 MACOSX_DEPLOYMENT_TARGET=26.0 cargo build --bin ax-probe    # binary: crates/platform-macos/target/debug/ax-probe
 
 # spawn target: Swift harness lives on the spike branch, not this one
+# (harness @ 5500727 writes /tmp/hypr-rust-target.json perm 0600 + prints target-token=<hex>)
 git show spike/macos-spike-1:spikes/macos/spike-macos.swift > /tmp/spike-macos.swift
 swiftc -O /tmp/spike-macos.swift -o /tmp/spike-macos && /tmp/spike-macos spawn-target &
+# capture: PID from `pgrep -f "spike-macos spawn-target"`, TOKEN from the spawn output
+TOKEN=$(python3 -c "import json;print(json.load(open('/tmp/hypr-rust-target.json'))['token'])")
 
-./target/debug/ax-probe frame <pid>            # baca
-./target/debug/ax-probe set-frame <pid> 120 120 420 312
-./target/debug/ax-probe set-frame <pid> nan 0 100 100   # ditolak: invalid geometry
-./target/debug/ax-probe raise <pid>
-kill <pid>; ./target/debug/ax-probe frame <pid>          # exit 4
+./target/debug/ax-probe frame <pid>                                                    # read-only, no token
+./target/debug/ax-probe set-frame --target <pid> --token <hex> 120 120 420 312          # mutate (token required)
+./target/debug/ax-probe raise --target <pid> --token <hex>                              # mutate (token required)
+./target/debug/ax-probe set-frame <pid> 120 120 420 312                                 # refused: exit 5 (no token)
+./target/debug/ax-probe set-frame --target <pid> --token <hex> nan 0 100 100            # refused: exit 1 (invalid geometry)
+kill <pid>; ./target/debug/ax-probe frame <pid>                                         # exit 4 (stale)
 ```
