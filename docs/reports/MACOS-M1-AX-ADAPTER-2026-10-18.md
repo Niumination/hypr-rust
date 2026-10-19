@@ -137,7 +137,7 @@ error: stale target (process/window gone)     # liveness gate (flock backstop: l
 oldtoken-exit=4
 ```
 
-**Fixture lock gate (F1+F1b)**: `set-frame`/`raise` tanpa `--target/--token`, atau dengan token tidak cocok / file tidak regular / symlink / uid salah / perm ≠0600 / lock tidak dipesan / pid mati → **exit 5** (atau 4 untuk pid mati) SEBELUM panggilan AX. Process-instance identity = flock yang ditahan fixture: saat fixture mati (SIGTERM/SIGKILL), kernel melepas lock → probe menolak. Hanya `EWOULDBLOCK`/`EAGAIN` (contention) yang diterima sebagai "lock ditahan"; error flock lain → tolak (fail closed). Hanya fixture self-owned hidup yang boleh dimutasi. `frame` tetap read-only dan bebas. Token tidak pernah muncul di log/dokumen.
+**Fixture lock gate (F1+F1b)**: `set-frame`/`raise` tanpa `--target/--token`, atau dengan token tidak cocok / file tidak regular / symlink / uid salah / perm ≠0600 / lock tidak dipesan / pid mati → **exit 5** (atau 4 untuk pid mati) SEBELUM panggilan AX. Process-instance identity = flock yang ditahan fixture: saat fixture mati (SIGTERM/SIGKILL), kernel melepas lock → probe menolak. Hanya `EWOULDBLOCK`/`EAGAIN` (contention) yang diterima sebagai "lock ditahan"; error flock lain → tolak (fail closed). Lock membuktikan fixture hidup saat diperiksa (TOCTOU — lihat §7), bukan bukti mutlak sampai mutasi. Hanya fixture self-owned hidup yang boleh dimutasi. `frame` tetap read-only dan bebas. Token tidak pernah muncul di log/dokumen.
 
 **Read-back verification (F2)**: setiap `set-frame` yang diterima AX dibaca balik (toleransi 1pt). Cocok → `ok` + frame terverifikasi; tidak cocok → geometri awal di-rollback penuh (posisi + ukuran) + diverifikasi → `VerificationFailed { expected, actual, rollback_restored }`. Semua set-frame di run ini terverifikasi cocok (read-back eksak).
 
@@ -185,6 +185,7 @@ oldtoken-exit=4
 - Fixture lock adalah jaring keselamatan **uji** (fixture self-owned), bukan kontrol akses multi-user: file di `~/.hypr-rust/` milik owner. Tujuannya mencegah probe menimpa window lain, bukan menahan adversary. Proses start-time tidak ada API publiknya → flock sebagai process-instance identity.
 - Mismatch read-back (`VerificationFailed`) dan read-back error (`VerificationReadFailed`) tidak bisa dipaksa runtime tanpa AX menolak/salah-set diam-diam (tidak ada switch AX publik); kontrak rollback penuh + verify diuji via 9 mock unit test (dilabeli mock), jalur native ditandai jujur belum live-tested.
 - **Rollback non-atomik (temuan #2):** AX API tidak transaksional. Jika AX menolak write rollback, window bisa tetap berubah sebagian. Kode melaporkan jujur (`rollback_restored=false` + best-known frame) tapi tidak bisa menjamin atomisitas "tidak ada perubahan parsial" saat AX menolak pemulihan. Ini batas inheren AX, bukan bug kode.
+- **Lock check TOCTOU (temuan #2 round-4):** probe memeriksa lock lalu menutup fd sebelum operasi AX. Lock membuktikan fixture hidup **saat diperiksa**, tidak menjamin fixture tetap hidup sampai mutasi berlangsung. Ini guard pengujian, bukan bukti mutlak perlindungan PID-reuse. Klaim lebih kuat butuh desain ulang agar identitas fixture terikat ke operasi mutasi (future work).
 
 ## 8. Reproduksi
 

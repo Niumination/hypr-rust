@@ -3,7 +3,7 @@
 **Purpose:** let an external verifier (arena.ai) check every public claim in this repo without access to the owner's host. Everything below is either (a) reproducible from the public repo alone, or (b) explicitly marked as host-bound evidence with the reason.
 
 **Repo:** https://github.com/Niumination/hypr-rust (public) · local: `labs/hypr-rust/`  
-**Date:** 2026-10-19 (updated after arena.ai round-4 review — lock fail-open, unused helpers, token print, mock count addressed)
+**Date:** 2026-10-19 (updated after arena.ai round-5 review — C9 softened, C14 lock TOCTOU, honest limits)
 
 ---
 
@@ -30,11 +30,12 @@ Platform-macos is deliberately **outside** workspace members: `cargo build/test 
 | C6 | No private APIs, no deps beyond workspace path-dep, no secrets | `crates/platform-macos/Cargo.toml` (single path dep); `ffi.rs` (only ApplicationServices/CoreFoundation/libSystem public symbols) | `grep -rE "SkyLight|CGSPrivate|SLSC" crates/` → empty |
 | C7 | Core is platform-neutral (no Apple frameworks in shared core) | `crates/layout-core` has zero deps, no `cfg(target_os)` | `cargo tree -p hypr-rust-layout-core` → empty |
 | C8 | Host identity: Hackintosh (OpenCore SMBIOS spoof `MacBookPro16,2`) on ThinkPad X13 Yoga Gen 1 | `docs/USER-DEVICE-PROFILE.md` §"Host identity — confirmed Hackintosh" (evidence table + EFI `SystemProductName` read) | owner-host bound — see §3 |
-| C9 | No partial mutation: geometry preflight + rollback | report §5/§6; `adapter.rs` `validate_frame_rect` (`Rect::is_finite_and_positive`), `SizeAfterPositionFailed` | `ax-probe set-frame --target <pid> --token <hex> nan 0 100 100` → exit 1, window unchanged; unit test `frame_validation_rejects_non_finite_and_non_positive` |
+| C9 | Preflight + best-effort rollback; recovery failure reported (NOT atomic) | report §5/§6/§7; `adapter.rs` `validate_frame_rect` (`Rect::is_finite_and_positive`), `set_window_frame_txn` (PositionWriteFailed / SizeAfterPositionFailed / VerificationReadFailed / VerificationFailed) | `ax-probe set-frame --target <pid> --token <hex> nan 0 100 100` → exit 1, window unchanged; 9 mock unit tests; AX not transactional → rollback best-effort (§7) |
 | C10 | Workspace builds without macOS | root `Cargo.toml` members = layout-core only; platform-macos standalone `[workspace]` | `cargo test --workspace` on any OS → layout-core only, no Apple link |
 | C11 | (F1) Mutation commands require a token matching the self-owned fixture registration; otherwise refused before any AX call | `ax-probe.rs` `verify_target_registration` (file regular non-symlink 0600 uid-match, pid+token match, pid alive, flock lock held — only EWOULDBLOCK/EAGAIN accepted as 'held', other errors reject), exit 5; `adapter.rs` `process_alive` | `ax-probe set-frame <pid> 1 2 3 4` → exit 5; live run §5 |
 | C12 | (F2) `set_window_frame` read-back verification: mismatch → full rollback + typed `VerificationFailed`; all post-mutation failures roll back | `adapter.rs` `frames_match` + `set_window_frame_txn` (PositionWriteFailed / SizeAfterPositionFailed / VerificationReadFailed / VerificationFailed); 9 mock unit tests | unit tests 15/15; live run §5 (all read-backs matched) |
 | C13 | (F1b) Fixture registration is lifecycle-bounded and resistant to PID reuse / stale records | `spike-macos.swift` `acquireFixtureLock`/`writeRegistration`/`removeRegistration` (flock held for fixture lifetime, atomic 0600 write, cleanup on terminate); `ax-probe.rs` `verify_fixture_lock` | live run §5: lock held while alive, freed on death → stale token rejected |
+| C14 | Lock check is a test guard, not absolute PID-reuse proof (TOCTOU) | `ax-probe.rs` `verify_fixture_lock` (checked before AX, fd closed) | documented: lock proves fixture alive at check time, not at mutation time; stronger claim needs binding fixture identity to the mutation operation (future work) |
 
 ## 3. Host-bound items (cannot be verified from arena.ai)
 
@@ -81,4 +82,4 @@ Note: `MACOSX_DEPLOYMENT_TARGET=26.0` needed only because the owner's rustc (Hom
 - No serials, UUIDs, MLB, credentials, unredacted window titles, or complete EFI configs in the repo (house rule; EFI read was `SystemProductName` only).
 - Permission-denied and Windows gaps marked, not hidden.
 - Spike #1 host label reconciled (was "MacBook Pro 13-inch class" → Hackintosh on ThinkPad X13 Yoga).
-- Arena.ai M1 closeout packet (F1/F1b/F2) addressed; mapping in report §6. Mock transaction tests labelled as mock; native rollback-denial not runtime-forced.
+- Arena.ai M1 closeout packet (F1/F1b/F2) + round-4/5 reviews addressed; mapping in report §6. Mock transaction tests labelled as mock; native rollback-denial not runtime-forced. C9 softened (rollback best-effort, not atomic); C14 documents lock TOCTOU as test guard, not absolute PID-reuse proof.
