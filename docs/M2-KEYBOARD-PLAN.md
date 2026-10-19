@@ -1,8 +1,9 @@
-# M2 Plan — Keyboard-first flow on self-owned fixture (macOS Tahoe)
+# M2 — Keyboard-first flow on self-owned fixture (macOS Tahoe)
 
-**Status:** DRAFT — for review/approval. No implementation yet.
-**Base:** M1 head `e78d104` (PR #3, pending re-review). Branch: `macos/m2-keyboard-plan`.
+**Status:** IMPLEMENTED (2026-10-19). Awaiting re-review.
+**Base:** M1 head `e78d104` (PR #3, merged). Branch: `macos/m2-keyboard-plan`.
 **Host:** owner ThinkPad X13 Yoga Gen 1, macOS Tahoe 26.7.1 (Hackintosh). Proves only this host/build.
+**Implementation:** `crates/platform-macos/src/bin/ax-keyboard.rs` — explicit one-shot actions (`select` / `move` / `resize` / `raise`) on the registered fixture, gated by the shared fixture verification (`src/fixture.rs`). No loop, no global hotkey, no auto-tiling.
 
 ## Objective
 
@@ -40,20 +41,50 @@ A small M2 that drives the M1 adapter from **explicit keyboard-first actions** o
 
 ## Acceptance criteria
 
-- [ ] Explicit keyboard action on the registered fixture performs exactly one native operation (move/resize/raise) via the M1 adapter.
-- [ ] Target selection is limited to the single registered fixture; user windows are never mutated.
-- [ ] No background loop / global hotkey / auto-tiling runs.
-- [ ] `raise` fires only on an explicit action.
-- [ ] Every failure path returns a typed error + best-known frame/status; no crash, no masked partial state.
-- [ ] fmt/clippy/test clean (workspace + standalone macOS crate).
-- [ ] Native rerun on the owner host: explicit move/resize/raise on the fixture; invalid geometry rejected; stale target typed; permission-denied marked NOT RUNTIME TESTED unless safely isolated.
-- [ ] No Spaces/private-API/general-Mac claims in docs.
+- [x] Explicit action on the registered fixture performs exactly one native operation (move/resize/raise) via the M1 adapter (`ax-keyboard move/resize/raise`).
+- [x] Target selection is limited to the single registered fixture (`ax-keyboard select`); user windows are never mutated.
+- [x] No background loop / global hotkey / auto-tiling — each action is an explicit one-shot CLI invocation.
+- [x] `raise` fires only on an explicit action (`ax-keyboard raise`).
+- [x] Every failure path returns a typed error + best-known frame/status (AxError variants, FixtureError); no crash, no masked partial state.
+- [x] fmt/clippy/test clean: workspace 6/6, standalone macOS crate 15/15, fmt/clippy clean.
+- [x] Native rerun on the owner host (2026-10-19): select ok · no-token move → exit 5 · move ok · resize ok · raise ok · invalid resize (0 h) → exit 1, window unchanged · stale → exit 4.
+- [x] No Spaces/private-API/general-Mac claims in docs.
+
+## Native rerun (verbatim, 2026-10-19, token redacted)
+
+```
+$ ax-keyboard select --target <pid> --token <hex>
+ok fixture pid=<pid> frame={x: 100, y: 668, width: 420, height: 312}
+$ ax-keyboard move <pid> 120 120                      # no token
+error: unregistered target (fixture identity verification failed)
+no-token-exit=5
+$ ax-keyboard move --target <pid> --token <hex> 120 120
+ok moved {x: 120, y: 120, width: 420, height: 312}
+$ ax-keyboard resize --target <pid> --token <hex> 480 320
+ok resized {x: 120, y: 120, width: 480, height: 320}
+$ ax-keyboard raise --target <pid> --token <hex>
+ok raised
+$ ax-keyboard resize --target <pid> --token <hex> 0 320
+error: invalid geometry (non-finite or non-positive size)
+invalid-exit=1
+$ kill <pid>; sleep 1
+$ ax-keyboard select --target <pid> --token <hex>
+error: stale target (process/window gone)
+stale-exit=4
+```
+
+## Verification summary
+
+- `ax-keyboard` reuses the M1 fixture gate (`src/fixture.rs`): token + flock lock + pid alive, fail closed. Only `EWOULDBLOCK`/`EAGAIN` counts as "lock held".
+- `move`/`resize` read the current frame, then apply an explicit `set_window_frame` (verified, rollback on failure). `raise` is explicit only.
+- Fixture verification extracted to `src/fixture.rs` and shared by `ax-probe` (M1) and `ax-keyboard` (M2) — no duplicated gate logic.
+- Permission-denied path: NOT RUNTIME TESTED (would disrupt TCC).
 
 ## Branch / workflow
 
-1. Wait for PR #3 re-review + owner approval (M1 must merge first).
-2. Implement on `macos/m2-keyboard-plan` (or a focused sub-branch) from the merged M1 head.
-3. Run fmt/clippy/tests + native acceptance on the owner host.
+1. ~~Wait for PR #3 re-review + owner approval~~ — done: PR #3 merged to main (`07f6059`).
+2. Implement on `macos/m2-keyboard-plan` from the merged M1 head — done: `ax-keyboard.rs` + shared `fixture.rs`.
+3. Run fmt/clippy/tests + native acceptance on the owner host — done: 21/21, native rerun green.
 4. Push, report exact SHAs + results, request re-review. Do not merge without approval.
 
 ## Risks / limitations

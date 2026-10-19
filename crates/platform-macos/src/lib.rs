@@ -9,5 +9,7 @@
 
 pub mod adapter;
 pub mod ffi;
+pub mod fixture;
 
 pub use adapter::{map_ax_error, process_alive, AxError, AxWindow, MacAxAdapter};
+pub use fixture::FixtureError;

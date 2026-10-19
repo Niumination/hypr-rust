@@ -25,22 +25,8 @@
 
 use std::process::ExitCode;
 
-use hypr_rust_platform_macos::{process_alive, AxError, MacAxAdapter};
+use hypr_rust_platform_macos::{fixture, AxError, FixtureError, MacAxAdapter};
 use layout_core::Rect;
-
-/// Fixture directory (owner-only) under the user's home.
-fn fixture_dir() -> Result<std::path::PathBuf, ()> {
-    let home = std::env::var("HOME").map_err(|_| ())?;
-    Ok(std::path::PathBuf::from(home).join(".hypr-rust"))
-}
-
-fn registration_path() -> Result<std::path::PathBuf, ()> {
-    Ok(fixture_dir()?.join("fixture-target.json"))
-}
-
-fn lock_path() -> Result<std::path::PathBuf, ()> {
-    Ok(fixture_dir()?.join("fixture.lock"))
-}
 
 /// Probe-level errors: adapter failures plus the registration failure.
 enum ProbeError {
@@ -108,7 +94,7 @@ fn run(args: &[String]) -> Result<(), ProbeError> {
         }
         "set-frame" | "raise" => {
             let (pid, token) = parse_target_args(args)?;
-            verify_target_registration(pid, &token)?;
+            fixture::verify_registration(pid, &token).map_err(map_fixture_error)?;
             let adapter = MacAxAdapter::connect()?;
             let window = adapter.main_window(pid)?;
             match command {
@@ -183,85 +169,12 @@ fn parse_target_args(args: &[String]) -> Result<(u32, String), ProbeError> {
     }
 }
 
-/// Verify the fixture registration end-to-end (fail closed on any problem):
-/// file exists, is a regular non-symlink file owned by the current user with
-/// perm 0600, contains matching pid + token, pid is alive, and the fixture
-/// liveness lock is held by a live process.
-fn verify_target_registration(pid: u32, token: &str) -> Result<(), ProbeError> {
-    let path = registration_path().map_err(|_| ProbeError::TargetUnregistered)?;
-    let meta = std::fs::symlink_metadata(&path).map_err(|_| ProbeError::TargetUnregistered)?;
-    // Must be a regular file, NOT a symlink (lstat, no symlink following).
-    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
-        return Err(ProbeError::TargetUnregistered);
+/// Map a fixture verification failure to a probe error.
+fn map_fixture_error(err: FixtureError) -> ProbeError {
+    match err {
+        FixtureError::Unregistered => ProbeError::TargetUnregistered,
+        FixtureError::Stale => ProbeError::Ax(AxError::StaleTarget),
     }
-    // Owner-only: uid must match the current user, perms exactly 0600.
-    use hypr_rust_platform_macos::ffi::getuid;
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    if meta.uid() != unsafe { getuid() } {
-        return Err(ProbeError::TargetUnregistered);
-    }
-    if meta.permissions().mode() & 0o777 != 0o600 {
-        return Err(ProbeError::TargetUnregistered);
-    }
-    let body = std::fs::read_to_string(&path).map_err(|_| ProbeError::TargetUnregistered)?;
-    let (file_pid, file_token) = parse_registration(&body).ok_or(ProbeError::TargetUnregistered)?;
-    if file_pid != pid || file_token != token {
-        return Err(ProbeError::TargetUnregistered);
-    }
-    if !process_alive(pid) {
-        return Err(ProbeError::Ax(AxError::StaleTarget));
-    }
-    verify_fixture_lock()?;
-    Ok(())
-}
-
-/// Verify the fixture liveness lock is held by a live process. If the probe
-/// can acquire the exclusive lock, no live fixture holds it (stale record or
-/// reused PID) -> reject. Only lock contention (EWOULDBLOCK/EAGAIN) counts as
-/// "held by a live fixture"; any other flock error is rejected (fail closed).
-fn verify_fixture_lock() -> Result<(), ProbeError> {
-    use hypr_rust_platform_macos::ffi::{
-        __error, close, flock, open, K_ERRNO_EWOULDBLOCK, LOCK_EX, LOCK_NB, O_RDWR,
-    };
-    let lock = lock_path().map_err(|_| ProbeError::TargetUnregistered)?;
-    let cstr = std::ffi::CString::new(lock.as_os_str().as_encoded_bytes())
-        .map_err(|_| ProbeError::TargetUnregistered)?;
-    // SAFETY: cstr is a valid NUL-terminated C string.
-    let fd = unsafe { open(cstr.as_ptr(), O_RDWR, 0o600) };
-    if fd < 0 {
-        return Err(ProbeError::TargetUnregistered);
-    }
-    // SAFETY: fd is a valid open file descriptor.
-    let ret = unsafe { flock(fd, LOCK_EX | LOCK_NB) };
-    // SAFETY: __error is the thread-local errno pointer (libSystem).
-    let errno = unsafe { *__error() };
-    // SAFETY: fd is a valid open file descriptor; closed once here.
-    unsafe { close(fd) };
-    if ret == 0 {
-        // Lock was free -> no live fixture -> reject.
-        return Err(ProbeError::TargetUnregistered);
-    }
-    // Only contention (EWOULDBLOCK/EAGAIN) means a live fixture holds the lock.
-    if errno == K_ERRNO_EWOULDBLOCK {
-        Ok(())
-    } else {
-        Err(ProbeError::TargetUnregistered)
-    }
-}
-
-/// Minimal parser for the harness-written registration JSON
-/// (`{"pid":<u32>,"token":"<hex>"}`). No dependencies.
-fn parse_registration(body: &str) -> Option<(u32, String)> {
-    let pid_start = body.find("\"pid\":")? + "\"pid\":".len();
-    let pid_end = body[pid_start..].find(|c: char| !c.is_ascii_digit())? + pid_start;
-    let pid: u32 = body[pid_start..pid_end].parse().ok()?;
-    let token_start = body.find("\"token\":\"")? + "\"token\":\"".len();
-    let token_end = body[token_start..].find('"')? + token_start;
-    let token = body[token_start..token_end].to_string();
-    if token.is_empty() {
-        return None;
-    }
-    Some((pid, token))
 }
 
 fn print_frame(rect: &Rect) {
