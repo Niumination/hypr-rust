@@ -1,7 +1,7 @@
 # Laporan Verifikasi — M1 Rust AX Adapter (macOS Tahoe)
 
 **Tanggal:** 18 Oktober 2026
-**Branch:** `macos/tahoe-ax-adapter-m1` @ `4176c0f` (adapter code; this report + arena brief land in the following docs commit)
+**Branch:** `macos/tahoe-ax-adapter-m1` @ `3d3df82` (adapter code; this report + arena brief land in the following docs commit)
 **Scope:** `docs/MACOS-TAHOE-NEXT-STAGE.md` — Stage M1, macOS-only vertical slice
 **Metode:** implementasi + native run di host user (self-owned target window)
 
@@ -98,7 +98,7 @@ test result: ok. 6 passed; 0 failed; ... (platform-macos: AXError mapping, Displ
 
 ## 5. Native run di host (verbatim)
 
-**Rerun 19 Okt 2026 (post-review round 3, fixture-locked)** — target: self-owned `HYPR-SPIKE-TARGET` (window 420×312) di-spawn oleh Swift spike harness @ `5d16063` (PR #1). Harness menulis `~/.hypr-rust/fixture-target.json` (0600) berisi `{pid, token}` + memegang `fixture.lock` (flock) seumur hidup. Token diredaksi di dokumen ini.
+**Rerun 19 Okt 2026 (post-review round 3, fixture-locked)** — target: self-owned `HYPR-SPIKE-TARGET` (window 420×312) di-spawn oleh Swift spike harness @ `0eb9a25` (PR #1). Harness menulis `~/.hypr-rust/fixture-target.json` (0600) berisi `{pid, token}` + memegang `fixture.lock` (flock) seumur hidup. Token diredaksi di dokumen ini.
 
 ```
 $ /tmp/spike-macos spawn-target &        # PID <redacted>, token <redacted>
@@ -137,7 +137,7 @@ error: stale target (process/window gone)     # liveness gate (flock backstop: l
 oldtoken-exit=4
 ```
 
-**Fixture lock gate (F1+F1b)**: `set-frame`/`raise` tanpa `--target/--token`, atau dengan token tidak cocok / file tidak regular / symlink / uid salah / perm ≠0600 / lock tidak dipesan / pid mati → **exit 5** (atau 4 untuk pid mati) SEBELUM panggilan AX. Process-instance identity = flock yang ditahan fixture: saat fixture mati (SIGTERM/SIGKILL), kernel melepas lock → probe menolak. Hanya fixture self-owned hidup yang boleh dimutasi. `frame` tetap read-only dan bebas. Token tidak pernah muncul di log/dokumen.
+**Fixture lock gate (F1+F1b)**: `set-frame`/`raise` tanpa `--target/--token`, atau dengan token tidak cocok / file tidak regular / symlink / uid salah / perm ≠0600 / lock tidak dipesan / pid mati → **exit 5** (atau 4 untuk pid mati) SEBELUM panggilan AX. Process-instance identity = flock yang ditahan fixture: saat fixture mati (SIGTERM/SIGKILL), kernel melepas lock → probe menolak. Hanya `EWOULDBLOCK`/`EAGAIN` (contention) yang diterima sebagai "lock ditahan"; error flock lain → tolak (fail closed). Hanya fixture self-owned hidup yang boleh dimutasi. `frame` tetap read-only dan bebas. Token tidak pernah muncul di log/dokumen.
 
 **Read-back verification (F2)**: setiap `set-frame` yang diterima AX dibaca balik (toleransi 1pt). Cocok → `ok` + frame terverifikasi; tidak cocok → geometri awal di-rollback penuh (posisi + ukuran) + diverifikasi → `VerificationFailed { expected, actual, rollback_restored }`. Semua set-frame di run ini terverifikasi cocok (read-back eksak).
 
@@ -170,7 +170,7 @@ oldtoken-exit=4
 | P2: fallback AXWindows tidak untuk error AX | ✅ | `is_missing_main_window`: noValue/attributeUnsupported → fallback; permission/stale/cannotComplete/illegal tetap propagasi |
 | P2: langkah reproduksi merujuk file yang tidak ada di branch | ✅ | §8 diperbaiki (ambil harness dari branch spike via `git show`) |
 | P2: `kill(pid,0)` menyamakan EPERM dengan mati | ✅ | Cek errno: hanya ESRCH → stale; EPERM/EFOTHER → hidup, AX surfacing error asli |
-| F1: mutasi `ax-probe` tidak terbatas ke target self-owned | ✅ | Token gate: `set-frame`/`raise` wajib `--target <pid> --token <hex>`; verifikasi fail-closed (file regular non-symlink 0600 uid-match + flock lock + pid+token cocok + pid hidup) sebelum AX; gagal → exit 5 (live-tested §5). `frame` tetap read-only. Swift mutating path dihapus |
+| F1: mutasi `ax-probe` tidak terbatas ke target self-owned | ✅ | Token gate: `set-frame`/`raise` wajib `--target <pid> --token <hex>`; verifikasi fail-closed (file regular non-symlink 0600 uid-match + flock lock — hanya EWOULDBLOCK/EAGAIN diterima, error lain tolak + pid+token cocok + pid hidup) sebelum AX; gagal → exit 5 (live-tested §5). `frame` tetap read-only. Swift mutating path dihapus |
 | F1b: registrasi fixture tidak lifecycle-bounded / rawan PID-reuse | ✅ | Registrasi didesain ulang: `~/.hypr-rust/` (0700), `fixture-target.json` (0600, atomic temp+rename), `fixture.lock` flock ditahan fixture seumur hidup (process-instance identity), cleanup saat terminate, fail closed. Proses start-time tidak ada API publiknya (proc_pidinfo/libproc private) → flock sebagai identity. PID-reuse ditolak (lock dilepas saat mati). Live-tested §5 |
 | F2: `set_window_frame` tanpa verifikasi hasil | ✅ | Read-back dalam adapter (tol 1pt) → mismatch: rollback penuh + `VerificationFailed {expected, actual, rollback_restored}`. SEMUA kegagalan pasca-mutasi (position/size/read-back error) → rollback penuh + typed error (`PositionWriteFailed`/`SizeAfterPositionFailed`/`VerificationReadFailed`). `set_window_frame` return verified frame; CLI read redundan dihapus. 9 mock unit test (FrameOps seam), dilabeli mock |
 
@@ -205,7 +205,7 @@ MACOSX_DEPLOYMENT_TARGET=26.0 cargo test                    # 15/15
 MACOSX_DEPLOYMENT_TARGET=26.0 cargo build --bin ax-probe    # binary: crates/platform-macos/target/debug/ax-probe
 
 # spawn target: Swift harness lives on the spike branch, not this one
-# (harness @ 5d16063 writes ~/.hypr-rust/fixture-target.json 0600 + holds fixture.lock)
+# (harness @ 0eb9a25 writes ~/.hypr-rust/fixture-target.json 0600 + holds fixture.lock)
 git show spike/macos-spike-1:spikes/macos/spike-macos.swift > /tmp/spike-macos.swift
 swiftc -O /tmp/spike-macos.swift -o /tmp/spike-macos && /tmp/spike-macos spawn-target &
 # capture: PID from `pgrep -f "spike-macos spawn-target"`, TOKEN from the registration file

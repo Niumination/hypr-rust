@@ -3,7 +3,7 @@
 **Purpose:** let an external verifier (arena.ai) check every public claim in this repo without access to the owner's host. Everything below is either (a) reproducible from the public repo alone, or (b) explicitly marked as host-bound evidence with the reason.
 
 **Repo:** https://github.com/Niumination/hypr-rust (public) · local: `labs/hypr-rust/`  
-**Date:** 2026-10-19 (updated after arena.ai M1 closeout packet — F1/F1b/F2 addressed)
+**Date:** 2026-10-19 (updated after arena.ai round-4 review — lock fail-open, unused helpers, token print, mock count addressed)
 
 ---
 
@@ -12,9 +12,9 @@
 | Branch | Commit | PR | Content |
 |---|---|---|---|
 | `main` | `b4800c7` | — | Doc bundle; Hackintosh host profile; arena brief |
-| `spike/macos-spike-1` | `5d16063` | [#1](https://github.com/Niumination/hypr-rust/pull/1) | Swift AX spike (Dock mutation removed), Spaces DISABLED, host-label reconciliation, lifecycle-bounded fixture registration (token + flock) |
+| `spike/macos-spike-1` | `0eb9a25` | [#1](https://github.com/Niumination/hypr-rust/pull/1) | Swift AX spike (Dock mutation removed), Spaces DISABLED, host-label reconciliation, lifecycle-bounded fixture registration (token + flock, no unused helpers, token not printed) |
 | `core/tiling-constraints` | `51cfced` | [#2](https://github.com/Niumination/hypr-rust/pull/2) | Min-size constraints + overflow policy (13 tests) |
-| `macos/tahoe-ax-adapter-m1` | `4176c0f` | [#3](https://github.com/Niumination/hypr-rust/pull/3) | M1 Rust AX adapter (rollback on all post-mutation failures + flock-gated registration); report/brief in the following docs commit |
+| `macos/tahoe-ax-adapter-m1` | `3d3df82` | [#3](https://github.com/Niumination/hypr-rust/pull/3) | M1 Rust AX adapter (rollback on all post-mutation failures + flock-gated registration, EWOULDBLOCK-only lock check); report/brief in the following docs commit |
 
 Platform-macos is deliberately **outside** workspace members: `cargo build/test --workspace` stays Windows-safe; the macOS crate is built via its own manifest (see §4).
 
@@ -32,7 +32,7 @@ Platform-macos is deliberately **outside** workspace members: `cargo build/test 
 | C8 | Host identity: Hackintosh (OpenCore SMBIOS spoof `MacBookPro16,2`) on ThinkPad X13 Yoga Gen 1 | `docs/USER-DEVICE-PROFILE.md` §"Host identity — confirmed Hackintosh" (evidence table + EFI `SystemProductName` read) | owner-host bound — see §3 |
 | C9 | No partial mutation: geometry preflight + rollback | report §5/§6; `adapter.rs` `validate_frame_rect` (`Rect::is_finite_and_positive`), `SizeAfterPositionFailed` | `ax-probe set-frame --target <pid> --token <hex> nan 0 100 100` → exit 1, window unchanged; unit test `frame_validation_rejects_non_finite_and_non_positive` |
 | C10 | Workspace builds without macOS | root `Cargo.toml` members = layout-core only; platform-macos standalone `[workspace]` | `cargo test --workspace` on any OS → layout-core only, no Apple link |
-| C11 | (F1) Mutation commands require a token matching the self-owned fixture registration; otherwise refused before any AX call | `ax-probe.rs` `verify_target_registration` (file regular non-symlink 0600 uid-match, pid+token match, pid alive, flock lock held), exit 5; `adapter.rs` `process_alive` | `ax-probe set-frame <pid> 1 2 3 4` → exit 5; live run §5 |
+| C11 | (F1) Mutation commands require a token matching the self-owned fixture registration; otherwise refused before any AX call | `ax-probe.rs` `verify_target_registration` (file regular non-symlink 0600 uid-match, pid+token match, pid alive, flock lock held — only EWOULDBLOCK/EAGAIN accepted as 'held', other errors reject), exit 5; `adapter.rs` `process_alive` | `ax-probe set-frame <pid> 1 2 3 4` → exit 5; live run §5 |
 | C12 | (F2) `set_window_frame` read-back verification: mismatch → full rollback + typed `VerificationFailed`; all post-mutation failures roll back | `adapter.rs` `frames_match` + `set_window_frame_txn` (PositionWriteFailed / SizeAfterPositionFailed / VerificationReadFailed / VerificationFailed); 9 mock unit tests | unit tests 15/15; live run §5 (all read-backs matched) |
 | C13 | (F1b) Fixture registration is lifecycle-bounded and resistant to PID reuse / stale records | `spike-macos.swift` `acquireFixtureLock`/`writeRegistration`/`removeRegistration` (flock held for fixture lifetime, atomic 0600 write, cleanup on terminate); `ax-probe.rs` `verify_fixture_lock` | live run §5: lock held while alive, freed on death → stale token rejected |
 
@@ -63,7 +63,7 @@ cd crates/platform-macos
 MACOSX_DEPLOYMENT_TARGET=26.0 cargo test                      # 15/15
 MACOSX_DEPLOYMENT_TARGET=26.0 cargo build --bin ax-probe
 
-# native (owner host): harness from spike branch @ 5d16063
+# native (owner host): harness from spike branch @ 0eb9a25
 git show spike/macos-spike-1:spikes/macos/spike-macos.swift > /tmp/spike-macos.swift
 swiftc -O /tmp/spike-macos.swift -o /tmp/spike-macos && /tmp/spike-macos spawn-target &
 # capture PID (pgrep) and TOKEN from ~/.hypr-rust/fixture-target.json (0600)
