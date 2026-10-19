@@ -30,24 +30,15 @@ fn main() -> ExitCode {
             ExitCode::from(5)
         }
         Err(KeyboardError::Ax(AxError::PermissionDenied)) => {
-            eprintln!("error: permission denied (Accessibility not granted)");
+            eprintln!("error: {}", format_ax_error(&AxError::PermissionDenied));
             ExitCode::from(3)
         }
         Err(KeyboardError::Ax(AxError::StaleTarget)) => {
-            eprintln!("error: stale target (process/window gone)");
+            eprintln!("error: {}", format_ax_error(&AxError::StaleTarget));
             ExitCode::from(4)
         }
-        Err(KeyboardError::Ax(AxError::InvalidGeometry)) => {
-            eprintln!("error: invalid geometry (non-finite or non-positive size)");
-            ExitCode::FAILURE
-        }
-        Err(KeyboardError::Ax(AxError::VerificationFailed { actual, .. })) => {
-            eprintln!("error: read-back mismatch; window frame: {actual:?}");
-            eprintln!("       see adapter error for expected frame and rollback status");
-            ExitCode::FAILURE
-        }
         Err(KeyboardError::Ax(other)) => {
-            eprintln!("error: {other}");
+            eprintln!("error: {}", format_ax_error(&other));
             ExitCode::FAILURE
         }
     }
@@ -177,6 +168,54 @@ fn parse_two(args: &[String]) -> Result<(f64, f64), AxError> {
     Ok((nums[0], nums[1]))
 }
 
+/// Format any AxError with its variant, rollback status, and best-known
+/// frame (or `<unreadable>` when the frame could not be read). Used by the
+/// CLI so every failure path reports the same complete information.
+fn format_ax_error(err: &AxError) -> String {
+    match err {
+        AxError::PermissionDenied => "permission denied (Accessibility not granted)".to_string(),
+        AxError::StaleTarget => "stale target (process/window gone)".to_string(),
+        AxError::Unsupported => "unsupported attribute/action".to_string(),
+        AxError::IllegalArgument => "illegal argument".to_string(),
+        AxError::NoWindows => "no windows for target".to_string(),
+        AxError::InvalidGeometry => "invalid geometry (non-finite or non-positive size)".to_string(),
+        AxError::PositionWriteFailed {
+            source,
+            rollback_restored,
+            actual,
+        } => format!(
+            "position write rejected ({source}); rollback_restored={rollback_restored}; actual={}",
+            actual.as_ref().map(fmt_frame).unwrap_or_else(|| "<unreadable>".into())
+        ),
+        AxError::SizeAfterPositionFailed {
+            source,
+            rollback_restored,
+            actual,
+        } => format!(
+            "size write rejected after position applied ({source}); rollback_restored={rollback_restored}; actual={}",
+            actual.as_ref().map(fmt_frame).unwrap_or_else(|| "<unreadable>".into())
+        ),
+        AxError::VerificationReadFailed {
+            source,
+            rollback_restored,
+            actual,
+        } => format!(
+            "read-back failed after writes ({source}); rollback_restored={rollback_restored}; actual={}",
+            actual.as_ref().map(fmt_frame).unwrap_or_else(|| "<unreadable>".into())
+        ),
+        AxError::VerificationFailed {
+            expected,
+            actual,
+            rollback_restored,
+        } => format!(
+            "read-back mismatch (expected {}, actual {}); rollback_restored={rollback_restored}",
+            fmt_frame(expected),
+            fmt_frame(actual),
+        ),
+        AxError::Failure(code) => format!("AX failure (code {code})"),
+    }
+}
+
 fn fmt_frame(rect: &Rect) -> String {
     format!(
         "{{x: {}, y: {}, width: {}, height: {}}}",
@@ -200,4 +239,52 @@ fn usage() {
     eprintln!(
         "usage: ax-keyboard select --target <pid> --token <hex>\n       ax-keyboard move --target <pid> --token <hex> <x> <y>\n       ax-keyboard resize --target <pid> --token <hex> <width> <height>\n       ax-keyboard raise --target <pid> --token <hex>"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_ax_error_reports_rollback_status_and_best_known_frame() {
+        let before = Rect::new(100.0, 668.0, 420.0, 312.0);
+        // Rollback restored, best-known frame present.
+        let err = AxError::PositionWriteFailed {
+            source: Box::new(AxError::Failure(-25200)),
+            rollback_restored: true,
+            actual: Some(before),
+        };
+        let s = format_ax_error(&err);
+        assert!(s.contains("rollback_restored=true"), "status: {s}");
+        assert!(s.contains("x: 100"), "frame: {s}");
+        // Rollback failed, best-known frame present.
+        let err = AxError::SizeAfterPositionFailed {
+            source: Box::new(AxError::Failure(-25200)),
+            rollback_restored: false,
+            actual: Some(before),
+        };
+        let s = format_ax_error(&err);
+        assert!(s.contains("rollback_restored=false"), "status: {s}");
+        assert!(s.contains("x: 100"), "frame: {s}");
+        // Read-back failed, frame unreadable -> <unreadable>.
+        let err = AxError::VerificationReadFailed {
+            source: Box::new(AxError::Failure(-25204)),
+            rollback_restored: false,
+            actual: None,
+        };
+        let s = format_ax_error(&err);
+        assert!(s.contains("read-back failed"), "variant: {s}");
+        assert!(s.contains("rollback_restored=false"), "status: {s}");
+        assert!(s.contains("<unreadable>"), "unreadable: {s}");
+        // VerificationFailed reports expected + actual + rollback.
+        let err = AxError::VerificationFailed {
+            expected: Rect::new(120.0, 120.0, 420.0, 312.0),
+            actual: Rect::new(999.0, 999.0, 420.0, 312.0),
+            rollback_restored: false,
+        };
+        let s = format_ax_error(&err);
+        assert!(s.contains("read-back mismatch"), "variant: {s}");
+        assert!(s.contains("x: 999"), "actual frame: {s}");
+        assert!(s.contains("rollback_restored=false"), "status: {s}");
+    }
 }

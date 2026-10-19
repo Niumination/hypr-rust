@@ -78,6 +78,7 @@ stale-exit=4
 - `ax-keyboard` reuses the M1 fixture gate (`src/fixture.rs`): token + flock lock + pid alive, fail closed. Only `EWOULDBLOCK`/`EAGAIN` counts as "lock held".
 - `move`/`resize` read the current frame, then apply an explicit `set_window_frame` (verified, rollback on failure). `raise` is explicit only.
 - Fixture verification extracted to `src/fixture.rs` and shared by `ax-probe` (M1) and `ax-keyboard` (M2) — no duplicated gate logic.
+- Every failure path reports a typed error with rollback status and best-known frame via `format_ax_error` (`<unreadable>` when the frame could not be read); unit-tested.
 - Permission-denied path: NOT RUNTIME TESTED (would disrupt TCC).
 
 ## Branch / workflow
