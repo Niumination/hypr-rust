@@ -141,7 +141,7 @@ oldtoken-exit=4
 
 **Read-back verification (F2)**: setiap `set-frame` yang diterima AX dibaca balik (toleransi 1pt). Cocok → `ok` + frame terverifikasi; tidak cocok → geometri awal di-rollback penuh (posisi + ukuran) + diverifikasi → `VerificationFailed { expected, actual, rollback_restored }`. Semua set-frame di run ini terverifikasi cocok (read-back eksak).
 
-**Rollback paths** (`PositionWriteFailed` / `SizeAfterPositionFailed` / `VerificationReadFailed`): tidak dapat dipaksa runtime tanpa AX menolak/salah-set diam-diam (tidak ada switch AX publik). Kontrak rollback penuh + verify diuji via 10 mock unit test (FrameOps seam) — dilabeli mock, bukan native. Murni-fungsi (`frames_match`, validasi) teruji unit.
+**Rollback paths** (`PositionWriteFailed` / `SizeAfterPositionFailed` / `VerificationReadFailed`): tidak dapat dipaksa runtime tanpa AX menolak/salah-set diam-diam (tidak ada switch AX publik). Kontrak rollback penuh + verify diuji via 9 mock unit test (FrameOps seam) — dilabeli mock, bukan native. Murni-fungsi (`frames_match`, validasi) teruji unit.
 
 **Leak fix** (P2-3): jalur sukses `main_window()` melepas ref aplikasi setelah window di-transfer ke `AxWindow` — ter-verifikasi code path (setiap panggilan sukses melepas `app` tepat sekali).
 
@@ -172,7 +172,7 @@ oldtoken-exit=4
 | P2: `kill(pid,0)` menyamakan EPERM dengan mati | ✅ | Cek errno: hanya ESRCH → stale; EPERM/EFOTHER → hidup, AX surfacing error asli |
 | F1: mutasi `ax-probe` tidak terbatas ke target self-owned | ✅ | Token gate: `set-frame`/`raise` wajib `--target <pid> --token <hex>`; verifikasi fail-closed (file regular non-symlink 0600 uid-match + flock lock + pid+token cocok + pid hidup) sebelum AX; gagal → exit 5 (live-tested §5). `frame` tetap read-only. Swift mutating path dihapus |
 | F1b: registrasi fixture tidak lifecycle-bounded / rawan PID-reuse | ✅ | Registrasi didesain ulang: `~/.hypr-rust/` (0700), `fixture-target.json` (0600, atomic temp+rename), `fixture.lock` flock ditahan fixture seumur hidup (process-instance identity), cleanup saat terminate, fail closed. Proses start-time tidak ada API publiknya (proc_pidinfo/libproc private) → flock sebagai identity. PID-reuse ditolak (lock dilepas saat mati). Live-tested §5 |
-| F2: `set_window_frame` tanpa verifikasi hasil | ✅ | Read-back dalam adapter (tol 1pt) → mismatch: rollback penuh + `VerificationFailed {expected, actual, rollback_restored}`. SEMUA kegagalan pasca-mutasi (position/size/read-back error) → rollback penuh + typed error (`PositionWriteFailed`/`SizeAfterPositionFailed`/`VerificationReadFailed`). `set_window_frame` return verified frame; CLI read redundan dihapus. 10 mock unit test (FrameOps seam), dilabeli mock |
+| F2: `set_window_frame` tanpa verifikasi hasil | ✅ | Read-back dalam adapter (tol 1pt) → mismatch: rollback penuh + `VerificationFailed {expected, actual, rollback_restored}`. SEMUA kegagalan pasca-mutasi (position/size/read-back error) → rollback penuh + typed error (`PositionWriteFailed`/`SizeAfterPositionFailed`/`VerificationReadFailed`). `set_window_frame` return verified frame; CLI read redundan dihapus. 9 mock unit test (FrameOps seam), dilabeli mock |
 
 ---
 
@@ -183,7 +183,8 @@ oldtoken-exit=4
 - Host: model identifier sistem (MacBookPro16,2) ≠ perangkat fisik owner (ThinkPad X13 Yoga) — lihat §1.
 - Windows 11: belum ada mesin target; klaim Windows menunggu native test.
 - Fixture lock adalah jaring keselamatan **uji** (fixture self-owned), bukan kontrol akses multi-user: file di `~/.hypr-rust/` milik owner. Tujuannya mencegah probe menimpa window lain, bukan menahan adversary. Proses start-time tidak ada API publiknya → flock sebagai process-instance identity.
-- Mismatch read-back (`VerificationFailed`) dan read-back error (`VerificationReadFailed`) tidak bisa dipaksa runtime tanpa AX menolak/salah-set diam-diam (tidak ada switch AX publik); kontrak rollback penuh + verify diuji via 10 mock unit test (dilabeli mock), jalur native ditandai jujur belum live-tested.
+- Mismatch read-back (`VerificationFailed`) dan read-back error (`VerificationReadFailed`) tidak bisa dipaksa runtime tanpa AX menolak/salah-set diam-diam (tidak ada switch AX publik); kontrak rollback penuh + verify diuji via 9 mock unit test (dilabeli mock), jalur native ditandai jujur belum live-tested.
+- **Rollback non-atomik (temuan #2):** AX API tidak transaksional. Jika AX menolak write rollback, window bisa tetap berubah sebagian. Kode melaporkan jujur (`rollback_restored=false` + best-known frame) tapi tidak bisa menjamin atomisitas "tidak ada perubahan parsial" saat AX menolak pemulihan. Ini batas inheren AX, bukan bug kode.
 
 ## 8. Reproduksi
 

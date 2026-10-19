@@ -30,6 +30,8 @@ pub const O_CREAT: c_int = 0x0200;
 // flock(2) operations (sys/file.h).
 pub const LOCK_EX: c_int = 0x02;
 pub const LOCK_NB: c_int = 0x04;
+// errno: resource temporarily unavailable (EWOULDBLOCK == EAGAIN on macOS).
+pub const K_ERRNO_EWOULDBLOCK: i32 = 35;
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {

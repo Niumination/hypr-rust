@@ -217,9 +217,12 @@ fn verify_target_registration(pid: u32, token: &str) -> Result<(), ProbeError> {
 
 /// Verify the fixture liveness lock is held by a live process. If the probe
 /// can acquire the exclusive lock, no live fixture holds it (stale record or
-/// reused PID) -> reject. This is the process-instance identity check.
+/// reused PID) -> reject. Only lock contention (EWOULDBLOCK/EAGAIN) counts as
+/// "held by a live fixture"; any other flock error is rejected (fail closed).
 fn verify_fixture_lock() -> Result<(), ProbeError> {
-    use hypr_rust_platform_macos::ffi::{close, flock, open, LOCK_EX, LOCK_NB, O_RDWR};
+    use hypr_rust_platform_macos::ffi::{
+        __error, close, flock, open, K_ERRNO_EWOULDBLOCK, LOCK_EX, LOCK_NB, O_RDWR,
+    };
     let lock = lock_path().map_err(|_| ProbeError::TargetUnregistered)?;
     let cstr = std::ffi::CString::new(lock.as_os_str().as_encoded_bytes())
         .map_err(|_| ProbeError::TargetUnregistered)?;
@@ -230,14 +233,20 @@ fn verify_fixture_lock() -> Result<(), ProbeError> {
     }
     // SAFETY: fd is a valid open file descriptor.
     let ret = unsafe { flock(fd, LOCK_EX | LOCK_NB) };
+    // SAFETY: __error is the thread-local errno pointer (libSystem).
+    let errno = unsafe { *__error() };
     // SAFETY: fd is a valid open file descriptor; closed once here.
     unsafe { close(fd) };
     if ret == 0 {
         // Lock was free -> no live fixture -> reject.
         return Err(ProbeError::TargetUnregistered);
     }
-    // Lock held by a live fixture -> ok.
-    Ok(())
+    // Only contention (EWOULDBLOCK/EAGAIN) means a live fixture holds the lock.
+    if errno == K_ERRNO_EWOULDBLOCK {
+        Ok(())
+    } else {
+        Err(ProbeError::TargetUnregistered)
+    }
 }
 
 /// Minimal parser for the harness-written registration JSON
