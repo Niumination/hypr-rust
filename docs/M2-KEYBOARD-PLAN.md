@@ -11,8 +11,8 @@ A small M2 that drives the M1 adapter from **explicit keyboard-first actions** o
 ## Decisions (binding for acceptance)
 
 1. **Single fixture window; multi-window tiling deferred.** M2 drives **one** self-owned fixture window. The M1 adapter resolves one main window per pid. Multi-window tiling (2+ windows) is **deferred to a later stage** — M2 does not claim tiling.
-2. **Target = registered fixture only.** Target selection picks among registered self-owned fixtures (by pid/token). Never select or mutate user windows. No general window enumeration for mutation.
-3. **Keyboard = explicit action, not a loop.** Keyboard input triggers one explicit action (e.g. a key chord → one move/resize/raise). **No** background loop, **no** global hotkey daemon, **no** auto-tiling. Each action is user-initiated and one-shot.
+2. **Target = the single registered fixture only.** Select/validate the one currently-registered fixture by PID/token. Never select or mutate user windows. No general window enumeration for mutation. Multi-fixture / registry support is **deferred**.
+3. **Keyboard = explicit action via focused UI/CLI, not a loop.** Keyboard input is received through the focused UI/CLI and triggers one explicit action (e.g. a key chord → one move/resize/raise). **No** background loop, **no** global hotkey daemon, **no** auto-tiling. Each action is user-initiated and one-shot.
 4. **`raise` only on explicit request.** No implicit raise on focus/selection.
 5. **Failure = typed error + best-known state.** On failure or rollback failure, report a typed error and the best-known frame/status. Never crash, never mask a partial result.
 6. **No Spaces / workspace emulation / private APIs / general-Mac claims.** Spaces stay disabled. No CGS/SkyLight. No claim of general macOS or Apple-Mac support.
@@ -21,7 +21,7 @@ A small M2 that drives the M1 adapter from **explicit keyboard-first actions** o
 
 ## Scope
 
-- **Target selection:** choose the registered fixture (pid/token) as the action target. Read-only discovery of registered fixtures only.
+- **Target selection:** select/validate the single currently-registered fixture (pid/token) as the action target. Read-only; no enumeration of user windows.
 - **Layout mapping:** map a small set of explicit keyboard actions to native operations via the M1 adapter:
   - move to a position (e.g. arrow/ctrl+arrow → `set_window_frame` position),
   - resize to a size (e.g. a chord → `set_window_frame` size),
@@ -41,7 +41,7 @@ A small M2 that drives the M1 adapter from **explicit keyboard-first actions** o
 ## Acceptance criteria
 
 - [ ] Explicit keyboard action on the registered fixture performs exactly one native operation (move/resize/raise) via the M1 adapter.
-- [ ] Target selection is limited to registered fixtures; user windows are never mutated.
+- [ ] Target selection is limited to the single registered fixture; user windows are never mutated.
 - [ ] No background loop / global hotkey / auto-tiling runs.
 - [ ] `raise` fires only on an explicit action.
 - [ ] Every failure path returns a typed error + best-known frame/status; no crash, no masked partial state.
