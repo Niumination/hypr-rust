@@ -8,7 +8,9 @@
 //   record                 Spike 0 environment record + window discovery (read-only)
 //   spawn-target           Start a controlled target window; registers it as the
 //                          self-owned mutation fixture (token + liveness lock),
-//                          prints its PID and token, stays alive
+//                          registers it as the self-owned mutation fixture
+//                          (token in owner-only file + liveness lock), prints
+//                          its PID, stays alive
 //   space-observe          Listen for NSWorkspace.activeSpaceDidChangeNotification (30 s)
 //   space-switch --dir right|left [--pid <n>]  Post public CGEvent Ctrl+Arrow, observe space change
 //
@@ -107,25 +109,6 @@ func axPoint(_ el: AXUIElement, _ name: String) -> CGPoint? {
     var p = CGPoint.zero
     guard AXValueGetValue(v as! AXValue, .cgPoint, &p) else { return nil }
     return p
-}
-
-func axSize(_ el: AXUIElement, _ name: String) -> CGSize? {
-    guard let v = axAttr(el, name), CFGetTypeID(v) == AXValueGetTypeID() else { return nil }
-    var s = CGSize.zero
-    guard AXValueGetValue(v as! AXValue, .cgSize, &s) else { return nil }
-    return s
-}
-
-func axSetPoint(_ el: AXUIElement, _ name: String, _ p: CGPoint) -> Bool {
-    var pp = p
-    guard let v = AXValueCreate(.cgPoint, &pp) else { return false }
-    return AXUIElementSetAttributeValue(el, name as CFString, v) == .success
-}
-
-func axSetSize(_ el: AXUIElement, _ name: String, _ s: CGSize) -> Bool {
-    var ss = s
-    guard let v = AXValueCreate(.cgSize, &ss) else { return false }
-    return AXUIElementSetAttributeValue(el, name as CFString, v) == .success
 }
 
 // MARK: - Spike 2 — Spaces contract (public surface only)
@@ -290,7 +273,7 @@ func spawnTarget() {
     win.makeKeyAndOrderFront(nil)
     app.activate(ignoringOtherApps: true)
 
-    print("target-token=\(token)")
+    print("fixture registered at ~/.hypr-rust/fixture-target.json (owner-only, token NOT printed — read from file)")
     print("HYPR-SPIKE-TARGET pid=\(getpid()) frame=\(win.frame)")
     print("fixture registered at ~/.hypr-rust/fixture-target.json (lock held for process lifetime)")
     print("keep this process running while the Rust probe executes…")
