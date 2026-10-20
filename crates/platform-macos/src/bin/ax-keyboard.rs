@@ -24,25 +24,34 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(KeyboardError::Unregistered) => {
-            eprintln!("error: unregistered target (fixture identity verification failed)");
-            eprintln!("       actions require --target <pid> --token <hex> from the harness");
-            ExitCode::from(5)
+        Err(err) => {
+            let (msg, code) = error_message(&err);
+            eprintln!("error: {msg}");
+            code
         }
-        Err(KeyboardError::Ax(AxError::PermissionDenied, _)) => {
-            eprintln!(
-                "error: {}",
-                format_ax_error(&AxError::PermissionDenied, None)
-            );
-            ExitCode::from(3)
-        }
-        Err(KeyboardError::Ax(AxError::StaleTarget, _)) => {
-            eprintln!("error: {}", format_ax_error(&AxError::StaleTarget, None));
-            ExitCode::from(4)
-        }
-        Err(KeyboardError::Ax(other, best_frame)) => {
-            eprintln!("error: {}", format_ax_error(&other, best_frame));
-            ExitCode::FAILURE
+    }
+}
+
+/// Map a `KeyboardError` to its user-facing message + exit code. Extracted
+/// from `main` so the dispatch (including `best_frame` propagation) is
+/// unit-testable. Transaction variants carry their own frame; all other
+/// variants report the caller-supplied best-known frame.
+fn error_message(err: &KeyboardError) -> (String, ExitCode) {
+    match err {
+        KeyboardError::Unregistered => (
+            "unregistered target (fixture identity verification failed)\n       actions require --target <pid> --token <hex> from the harness".to_string(),
+            ExitCode::from(5),
+        ),
+        KeyboardError::Ax(AxError::PermissionDenied, best_frame) => (
+            format_ax_error(&AxError::PermissionDenied, *best_frame),
+            ExitCode::from(3),
+        ),
+        KeyboardError::Ax(AxError::StaleTarget, best_frame) => (
+            format_ax_error(&AxError::StaleTarget, *best_frame),
+            ExitCode::from(4),
+        ),
+        KeyboardError::Ax(other, best_frame) => {
+            (format_ax_error(other, *best_frame), ExitCode::FAILURE)
         }
     }
 }
@@ -361,5 +370,25 @@ mod tests {
         // No best frame available -> <unavailable>.
         let s = format_ax_error(&AxError::InvalidGeometry, None);
         assert!(s.contains("<unavailable>"), "unavailable: {s}");
+    }
+
+    #[test]
+    fn error_message_dispatch_propagates_best_frame() {
+        let frame = Some(Rect::new(100.0, 668.0, 420.0, 312.0));
+        // PermissionDenied with a best-known frame -> frame appears.
+        let (msg, code) = error_message(&KeyboardError::Ax(AxError::PermissionDenied, frame));
+        assert!(msg.contains("permission denied"), "variant: {msg}");
+        assert!(msg.contains("rollback_restored=n/a"), "status: {msg}");
+        assert!(msg.contains("x: 100"), "frame: {msg}");
+        assert_eq!(code, ExitCode::from(3));
+        // StaleTarget with a best-known frame -> frame appears.
+        let (msg, code) = error_message(&KeyboardError::Ax(AxError::StaleTarget, frame));
+        assert!(msg.contains("stale target"), "variant: {msg}");
+        assert!(msg.contains("rollback_restored=n/a"), "status: {msg}");
+        assert!(msg.contains("x: 100"), "frame: {msg}");
+        assert_eq!(code, ExitCode::from(4));
+        // Without a best-known frame -> <unavailable>.
+        let (msg, _) = error_message(&KeyboardError::Ax(AxError::PermissionDenied, None));
+        assert!(msg.contains("<unavailable>"), "unavailable: {msg}");
     }
 }
