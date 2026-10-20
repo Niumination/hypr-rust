@@ -29,16 +29,19 @@ fn main() -> ExitCode {
             eprintln!("       actions require --target <pid> --token <hex> from the harness");
             ExitCode::from(5)
         }
-        Err(KeyboardError::Ax(AxError::PermissionDenied)) => {
-            eprintln!("error: {}", format_ax_error(&AxError::PermissionDenied));
+        Err(KeyboardError::Ax(AxError::PermissionDenied, _)) => {
+            eprintln!(
+                "error: {}",
+                format_ax_error(&AxError::PermissionDenied, None)
+            );
             ExitCode::from(3)
         }
-        Err(KeyboardError::Ax(AxError::StaleTarget)) => {
-            eprintln!("error: {}", format_ax_error(&AxError::StaleTarget));
+        Err(KeyboardError::Ax(AxError::StaleTarget, _)) => {
+            eprintln!("error: {}", format_ax_error(&AxError::StaleTarget, None));
             ExitCode::from(4)
         }
-        Err(KeyboardError::Ax(other)) => {
-            eprintln!("error: {}", format_ax_error(&other));
+        Err(KeyboardError::Ax(other, best_frame)) => {
+            eprintln!("error: {}", format_ax_error(&other, best_frame));
             ExitCode::FAILURE
         }
     }
@@ -46,12 +49,14 @@ fn main() -> ExitCode {
 
 enum KeyboardError {
     Unregistered,
-    Ax(AxError),
+    /// AxError + best-known frame from the caller (if any was read before
+    /// the failure). Transaction variants carry their own `actual` frame.
+    Ax(AxError, Option<Rect>),
 }
 
 impl From<AxError> for KeyboardError {
     fn from(err: AxError) -> Self {
-        Self::Ax(err)
+        Self::Ax(err, None)
     }
 }
 
@@ -59,7 +64,7 @@ impl From<FixtureError> for KeyboardError {
     fn from(err: FixtureError) -> Self {
         match err {
             FixtureError::Unregistered => Self::Unregistered,
-            FixtureError::Stale => Self::Ax(AxError::StaleTarget),
+            FixtureError::Stale => Self::Ax(AxError::StaleTarget, None),
         }
     }
 }
@@ -67,7 +72,7 @@ impl From<FixtureError> for KeyboardError {
 fn run(args: &[String]) -> Result<(), KeyboardError> {
     if args.len() < 2 {
         usage();
-        return Err(KeyboardError::Ax(AxError::IllegalArgument));
+        return Err(KeyboardError::Ax(AxError::IllegalArgument, None));
     }
     let command = args[1].as_str();
     match command {
@@ -91,7 +96,9 @@ fn run(args: &[String]) -> Result<(), KeyboardError> {
                     // Preserve the current size; move is an explicit position set.
                     let current = adapter.window_frame(&window)?;
                     let rect = Rect::new(x, y, current.width, current.height);
-                    let verified = adapter.set_window_frame(&window, rect)?;
+                    let verified = adapter
+                        .set_window_frame(&window, rect)
+                        .map_err(|e| KeyboardError::Ax(e, Some(current)))?;
                     println!("ok moved {}", fmt_frame(&verified));
                     Ok(())
                 }
@@ -100,7 +107,9 @@ fn run(args: &[String]) -> Result<(), KeyboardError> {
                     // Preserve the current position; resize is an explicit size set.
                     let current = adapter.window_frame(&window)?;
                     let rect = Rect::new(current.x, current.y, w, h);
-                    let verified = adapter.set_window_frame(&window, rect)?;
+                    let verified = adapter
+                        .set_window_frame(&window, rect)
+                        .map_err(|e| KeyboardError::Ax(e, Some(current)))?;
                     println!("ok resized {}", fmt_frame(&verified));
                     Ok(())
                 }
@@ -114,7 +123,7 @@ fn run(args: &[String]) -> Result<(), KeyboardError> {
         other => {
             eprintln!("unknown command: {other}");
             usage();
-            Err(KeyboardError::Ax(AxError::IllegalArgument))
+            Err(KeyboardError::Ax(AxError::IllegalArgument, None))
         }
     }
 }
@@ -169,16 +178,40 @@ fn parse_two(args: &[String]) -> Result<(f64, f64), AxError> {
 }
 
 /// Format any AxError with its variant, rollback status, and best-known
-/// frame (or `<unreadable>` when the frame could not be read). Used by the
-/// CLI so every failure path reports the same complete information.
-fn format_ax_error(err: &AxError) -> String {
+/// frame. Transaction variants (`*WriteFailed`/`*ReadFailed`/
+/// `VerificationFailed`) carry their own `actual` frame + rollback status.
+/// Non-transaction variants report `rollback_restored=n/a` and the best-known
+/// frame supplied by the caller (`<unavailable>` when none was read).
+fn format_ax_error(err: &AxError, best_frame: Option<Rect>) -> String {
+    let frame_str = || {
+        best_frame
+            .as_ref()
+            .map(fmt_frame)
+            .unwrap_or_else(|| "<unavailable>".into())
+    };
     match err {
-        AxError::PermissionDenied => "permission denied (Accessibility not granted)".to_string(),
-        AxError::StaleTarget => "stale target (process/window gone)".to_string(),
-        AxError::Unsupported => "unsupported attribute/action".to_string(),
-        AxError::IllegalArgument => "illegal argument".to_string(),
-        AxError::NoWindows => "no windows for target".to_string(),
-        AxError::InvalidGeometry => "invalid geometry (non-finite or non-positive size)".to_string(),
+        AxError::PermissionDenied => format!(
+            "permission denied (Accessibility not granted); rollback_restored=n/a; frame={}",
+            frame_str()
+        ),
+        AxError::StaleTarget => format!(
+            "stale target (process/window gone); rollback_restored=n/a; frame={}",
+            frame_str()
+        ),
+        AxError::Unsupported => format!(
+            "unsupported attribute/action; rollback_restored=n/a; frame={}",
+            frame_str()
+        ),
+        AxError::IllegalArgument => {
+            format!("illegal argument; rollback_restored=n/a; frame={}", frame_str())
+        }
+        AxError::NoWindows => {
+            format!("no windows for target; rollback_restored=n/a; frame={}", frame_str())
+        }
+        AxError::InvalidGeometry => format!(
+            "invalid geometry (non-finite or non-positive size); rollback_restored=n/a; frame={}",
+            frame_str()
+        ),
         AxError::PositionWriteFailed {
             source,
             rollback_restored,
@@ -212,7 +245,10 @@ fn format_ax_error(err: &AxError) -> String {
             fmt_frame(expected),
             fmt_frame(actual),
         ),
-        AxError::Failure(code) => format!("AX failure (code {code})"),
+        AxError::Failure(code) => format!(
+            "AX failure (code {code}); rollback_restored=n/a; frame={}",
+            frame_str()
+        ),
     }
 }
 
@@ -248,43 +284,82 @@ mod tests {
     #[test]
     fn format_ax_error_reports_rollback_status_and_best_known_frame() {
         let before = Rect::new(100.0, 668.0, 420.0, 312.0);
-        // Rollback restored, best-known frame present.
+        let best = Some(Rect::new(100.0, 668.0, 420.0, 312.0));
+
+        // Transaction variants carry their own `actual` frame + rollback status.
         let err = AxError::PositionWriteFailed {
             source: Box::new(AxError::Failure(-25200)),
             rollback_restored: true,
             actual: Some(before),
         };
-        let s = format_ax_error(&err);
+        let s = format_ax_error(&err, None);
         assert!(s.contains("rollback_restored=true"), "status: {s}");
         assert!(s.contains("x: 100"), "frame: {s}");
-        // Rollback failed, best-known frame present.
+
         let err = AxError::SizeAfterPositionFailed {
             source: Box::new(AxError::Failure(-25200)),
             rollback_restored: false,
             actual: Some(before),
         };
-        let s = format_ax_error(&err);
+        let s = format_ax_error(&err, None);
         assert!(s.contains("rollback_restored=false"), "status: {s}");
         assert!(s.contains("x: 100"), "frame: {s}");
-        // Read-back failed, frame unreadable -> <unreadable>.
+
         let err = AxError::VerificationReadFailed {
             source: Box::new(AxError::Failure(-25204)),
             rollback_restored: false,
             actual: None,
         };
-        let s = format_ax_error(&err);
+        let s = format_ax_error(&err, None);
         assert!(s.contains("read-back failed"), "variant: {s}");
         assert!(s.contains("rollback_restored=false"), "status: {s}");
         assert!(s.contains("<unreadable>"), "unreadable: {s}");
-        // VerificationFailed reports expected + actual + rollback.
+
         let err = AxError::VerificationFailed {
             expected: Rect::new(120.0, 120.0, 420.0, 312.0),
             actual: Rect::new(999.0, 999.0, 420.0, 312.0),
             rollback_restored: false,
         };
-        let s = format_ax_error(&err);
+        let s = format_ax_error(&err, None);
         assert!(s.contains("read-back mismatch"), "variant: {s}");
         assert!(s.contains("x: 999"), "actual frame: {s}");
         assert!(s.contains("rollback_restored=false"), "status: {s}");
+
+        // Non-transaction variants: rollback_restored=n/a + best-known frame.
+        let s = format_ax_error(&AxError::InvalidGeometry, best);
+        assert!(s.contains("invalid geometry"), "variant: {s}");
+        assert!(s.contains("rollback_restored=n/a"), "status: {s}");
+        assert!(s.contains("x: 100"), "frame: {s}");
+
+        let s = format_ax_error(&AxError::PermissionDenied, best);
+        assert!(s.contains("permission denied"), "variant: {s}");
+        assert!(s.contains("rollback_restored=n/a"), "status: {s}");
+        assert!(s.contains("x: 100"), "frame: {s}");
+
+        let s = format_ax_error(&AxError::StaleTarget, best);
+        assert!(s.contains("stale target"), "variant: {s}");
+        assert!(s.contains("rollback_restored=n/a"), "status: {s}");
+        assert!(s.contains("x: 100"), "frame: {s}");
+
+        let s = format_ax_error(&AxError::Unsupported, best);
+        assert!(s.contains("unsupported"), "variant: {s}");
+        assert!(s.contains("rollback_restored=n/a"), "status: {s}");
+
+        let s = format_ax_error(&AxError::IllegalArgument, best);
+        assert!(s.contains("illegal argument"), "variant: {s}");
+        assert!(s.contains("rollback_restored=n/a"), "status: {s}");
+
+        let s = format_ax_error(&AxError::NoWindows, best);
+        assert!(s.contains("no windows"), "variant: {s}");
+        assert!(s.contains("rollback_restored=n/a"), "status: {s}");
+
+        let s = format_ax_error(&AxError::Failure(-25200), best);
+        assert!(s.contains("AX failure"), "variant: {s}");
+        assert!(s.contains("rollback_restored=n/a"), "status: {s}");
+        assert!(s.contains("x: 100"), "frame: {s}");
+
+        // No best frame available -> <unavailable>.
+        let s = format_ax_error(&AxError::InvalidGeometry, None);
+        assert!(s.contains("<unavailable>"), "unavailable: {s}");
     }
 }
