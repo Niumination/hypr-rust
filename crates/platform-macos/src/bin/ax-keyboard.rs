@@ -39,7 +39,7 @@ fn main() -> ExitCode {
 fn error_message(err: &KeyboardError) -> (String, ExitCode) {
     match err {
         KeyboardError::Unregistered => (
-            "unregistered target (fixture identity verification failed)\n       actions require --target <pid> --token <hex> from the harness".to_string(),
+            "unregistered target (fixture identity verification failed)\n       actions require --target <pid> --token <hex> from the harness\n       rollback_restored=n/a; frame=<unavailable> (precondition failure before AX)".to_string(),
             ExitCode::from(5),
         ),
         KeyboardError::Ax(AxError::PermissionDenied, best_frame) => (
@@ -390,5 +390,11 @@ mod tests {
         // Without a best-known frame -> <unavailable>.
         let (msg, _) = error_message(&KeyboardError::Ax(AxError::PermissionDenied, None));
         assert!(msg.contains("<unavailable>"), "unavailable: {msg}");
+        // Unregistered (precondition failure before AX) still reports the markers.
+        let (msg, code) = error_message(&KeyboardError::Unregistered);
+        assert!(msg.contains("unregistered target"), "variant: {msg}");
+        assert!(msg.contains("rollback_restored=n/a"), "status: {msg}");
+        assert!(msg.contains("frame=<unavailable>"), "frame: {msg}");
+        assert_eq!(code, ExitCode::from(5));
     }
 }

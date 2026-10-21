@@ -46,7 +46,7 @@ A small M2 that drives the M1 adapter from **explicit keyboard-first actions** o
 - [x] No background loop / global hotkey / auto-tiling — each action is an explicit one-shot CLI invocation.
 - [x] `raise` fires only on an explicit action (`ax-keyboard raise`).
 - [x] Every failure path returns a typed error + best-known frame/status (AxError variants, FixtureError); no crash, no masked partial state.
-- [x] fmt/clippy/test clean: workspace 6/6, standalone macOS crate 15/15, fmt/clippy clean.
+- [x] fmt/clippy/test clean: workspace 6/6, standalone macOS crate 17/17, fmt/clippy clean.
 - [x] Native rerun on the owner host (2026-10-19): select ok · no-token move → exit 5 · move ok · resize ok · raise ok · invalid resize (0 h) → exit 1, window unchanged · stale → exit 4.
 - [x] No Spaces/private-API/general-Mac claims in docs.
 
@@ -78,14 +78,14 @@ stale-exit=4
 - `ax-keyboard` reuses the M1 fixture gate (`src/fixture.rs`): token + flock lock + pid alive, fail closed. Only `EWOULDBLOCK`/`EAGAIN` counts as "lock held".
 - `move`/`resize` read the current frame, then apply an explicit `set_window_frame` (verified, rollback on failure). `raise` is explicit only.
 - Fixture verification extracted to `src/fixture.rs` and shared by `ax-probe` (M1) and `ax-keyboard` (M2) — no duplicated gate logic.
-- Every failure path reports a typed error with rollback status and best-known frame via `format_ax_error` for ALL error variants: transaction variants carry their own `actual` frame + `rollback_restored`; non-transaction variants report `rollback_restored=n/a` + the caller-supplied frame (`<unavailable>` when none was read). `move`/`resize` pass the pre-read frame so `InvalidGeometry` reports it. The `error_message` dispatch propagates `best_frame` for `PermissionDenied`/`StaleTarget` too. Unit-tested for all variants + dispatch regression.
+- Every failure path reports a typed error with rollback status and best-known frame via `format_ax_error` for ALL error variants: transaction variants carry their own `actual` frame + `rollback_restored`; non-transaction variants report `rollback_restored=n/a` + the caller-supplied frame (`<unavailable>` when none was read). `move`/`resize` pass the pre-read frame so `InvalidGeometry` reports it. The `error_message` dispatch propagates `best_frame` for `PermissionDenied`/`StaleTarget` too, and the `Unregistered` (precondition failure before AX) path reports `rollback_restored=n/a; frame=<unavailable>`. Unit-tested for all variants + dispatch regression.
 - Permission-denied path: NOT RUNTIME TESTED (would disrupt TCC).
 
 ## Branch / workflow
 
 1. ~~Wait for PR #3 re-review + owner approval~~ — done: PR #3 merged to main (`07f6059`).
 2. Implement on `macos/m2-keyboard-plan` from the merged M1 head — done: `ax-keyboard.rs` + shared `fixture.rs`.
-3. Run fmt/clippy/tests + native acceptance on the owner host — done: 21/21, native rerun green.
+3. Run fmt/clippy/tests + native acceptance on the owner host — done: 23/23, native rerun green.
 4. Push, report exact SHAs + results, request re-review. Do not merge without approval.
 
 ## Risks / limitations
