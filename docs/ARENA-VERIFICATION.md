@@ -9,12 +9,16 @@
 
 ## 1. Artifact map (all public)
 
+`Commit` = latest **code** commit for that row's content. A docs-only tip may
+sit above it.
+
 | Branch | Commit | PR | Content |
 |---|---|---|---|
-| `main` | `b4800c7` | — | Doc bundle; Hackintosh host profile; arena brief |
+| `main` | `07f6059` | — | Doc bundle; Hackintosh host profile; arena brief; M1 AX adapter merged |
 | `spike/macos-spike-1` | `0eb9a25` | [#1](https://github.com/Niumination/hypr-rust/pull/1) | Swift AX spike (Dock mutation removed), Spaces DISABLED, host-label reconciliation, lifecycle-bounded fixture registration (token + flock, no unused helpers, token not printed) |
 | `core/tiling-constraints` | `51cfced` | [#2](https://github.com/Niumination/hypr-rust/pull/2) | Min-size constraints + overflow policy (13 tests) |
-| `macos/tahoe-ax-adapter-m1` | `3d3df82` | [#3](https://github.com/Niumination/hypr-rust/pull/3) | M1 Rust AX adapter (rollback on all post-mutation failures + flock-gated registration, EWOULDBLOCK-only lock check); report/brief in the following docs commit |
+| `macos/tahoe-ax-adapter-m1` | `e78d104` | [#3](https://github.com/Niumination/hypr-rust/pull/3) | M1 Rust AX adapter (rollback on all post-mutation failures + flock-gated registration, EWOULDBLOCK-only lock check); merged to main |
+| `macos/m2-keyboard-plan` | `1b022a7` | [#4](https://github.com/Niumination/hypr-rust/pull/4) | M2 keyboard-first plan + `ax-keyboard` implementation (select/move/resize/raise); all-variants error formatter + dispatch |
 
 Platform-macos is deliberately **outside** workspace members: `cargo build/test --workspace` stays Windows-safe; the macOS crate is built via its own manifest (see §4).
 
@@ -32,16 +36,18 @@ Platform-macos is deliberately **outside** workspace members: `cargo build/test 
 | C8 | Host identity: Hackintosh (OpenCore SMBIOS spoof `MacBookPro16,2`) on ThinkPad X13 Yoga Gen 1 | `docs/USER-DEVICE-PROFILE.md` §"Host identity — confirmed Hackintosh" (evidence table + EFI `SystemProductName` read) | owner-host bound — see §3 |
 | C9 | Preflight + best-effort rollback; recovery failure reported (NOT atomic) | report §5/§6/§7; `adapter.rs` `validate_frame_rect` (`Rect::is_finite_and_positive`), `set_window_frame_txn` (PositionWriteFailed / SizeAfterPositionFailed / VerificationReadFailed / VerificationFailed) | `ax-probe set-frame --target <pid> --token <hex> nan 0 100 100` → exit 1, window unchanged; 9 mock unit tests; AX not transactional → rollback best-effort (§7) |
 | C10 | Workspace builds without macOS | root `Cargo.toml` members = layout-core only; platform-macos standalone `[workspace]` | `cargo test --workspace` on any OS → layout-core only, no Apple link |
-| C11 | (F1) Mutation commands require a token matching the self-owned fixture registration; otherwise refused before any AX call | `ax-probe.rs` `verify_target_registration` (file regular non-symlink 0600 uid-match, pid+token match, pid alive, flock lock held — only EWOULDBLOCK/EAGAIN accepted as 'held', other errors reject), exit 5; `adapter.rs` `process_alive` | `ax-probe set-frame <pid> 1 2 3 4` → exit 5; live run §5 |
-| C12 | (F2) `set_window_frame` read-back verification: mismatch → full rollback + typed `VerificationFailed`; all post-mutation failures roll back | `adapter.rs` `frames_match` + `set_window_frame_txn` (PositionWriteFailed / SizeAfterPositionFailed / VerificationReadFailed / VerificationFailed); 9 mock unit tests | unit tests 15/15; live run §5 (all read-backs matched) |
+| C11 | (F1) Mutation commands require a token matching the self-owned fixture registration; otherwise refused before any AX call | `fixture.rs` `verify_registration` (file regular non-symlink 0600 uid-match, pid+token match, pid alive, flock lock held — only EWOULDBLOCK/EAGAIN accepted as 'held', other errors reject), exit 5; `adapter.rs` `process_alive` | `ax-probe set-frame <pid> 1 2 3 4` → exit 5; live run §5 |
+| C12 | (F2) `set_window_frame` read-back verification: mismatch → full rollback + typed `VerificationFailed`; all post-mutation failures roll back | `adapter.rs` `frames_match` + `set_window_frame_txn` (PositionWriteFailed / SizeAfterPositionFailed / VerificationReadFailed / VerificationFailed); 9 mock unit tests | unit tests 17/17; live run §5 (all read-backs matched) |
 | C13 | (F1b) Fixture registration is lifecycle-bounded; rejects stale records when the lock is free (lock does NOT bind fixture identity to the AX operation — see C14) | `spike-macos.swift` `acquireFixtureLock`/`writeRegistration`/`removeRegistration` (flock held for fixture lifetime, atomic 0600 write, cleanup on terminate); `ax-probe.rs` `verify_fixture_lock` | live run §5: lock held while alive, freed on death → stale record rejected |
 | C14 | Lock check is a test guard, not absolute PID-reuse proof (TOCTOU) | `ax-probe.rs` `verify_fixture_lock` (checked before AX, fd closed) | documented: lock proves fixture alive at check time, not at mutation time; stronger claim needs binding fixture identity to the mutation operation (future work) |
+| C15 | (M2) Explicit keyboard-first actions on the registered fixture via `ax-keyboard` | `ax-keyboard.rs` `select`/`move`/`resize`/`raise`; `fixture.rs` `verify_registration` | native run §M2: select ok · no-token exit 5 · move/resize/raise ok · invalid exit 1 · stale exit 4 |
+| C16 | (M2) No loop / global hotkey / auto-tiling; raise explicit only; failure typed with rollback status + best-known frame for ALL error variants | `ax-keyboard.rs` (one-shot CLI actions, no loop); `format_ax_error` (transaction variants: own `actual` + `rollback_restored`; non-transaction: `rollback_restored=n/a` + caller-supplied frame or `<unavailable>`); `KeyboardError::Ax(AxError, Option<Rect>)`; `error_message` dispatch (propagates `best_frame` for PermissionDenied/StaleTarget; `Unregistered` reports `rollback_restored=n/a; frame=<unavailable>` precondition marker); `AxError` + `FixtureError` typed errors | native run §M2; unit tests `format_ax_error_reports_rollback_status_and_best_known_frame` (all variants) + `error_message_dispatch_propagates_best_frame` (dispatch regression incl. Unregistered); code has no background loop or hotkey daemon |
 
 ## 3. Host-bound items (cannot be verified from arena.ai)
 
 | Item | Status | Why |
 |---|---|---|
-| Native AX run (C4/C5/C9/C11/C12/C13) | **executed on owner host**, verbatim in report §5 | requires the physical Hackintosh + AX grant + self-owned target window |
+| Native AX run (C4/C5/C9/C11/C12/C13/C15/C16) | **executed on owner host**, verbatim in report §5 / M2 §Native | requires the physical Hackintosh + AX grant + self-owned target window |
 | Permission-denied path | **NOT RUNTIME TESTED** | code path exists (`connect()` gate → `PermissionDenied`, exit 3); revoking AX trust would break the test environment |
 | Hackintosh identity (C8) | verified read-only on owner host (kextstat, `hw.model`, EFI `SystemProductName`) | EFI partition not public; evidence table is the public record |
 | Windows 11 behavior | **not verified** | no Windows boot this session; `platform-windows` deferred per `MACOS-TAHOE-NEXT-STAGE.md` |
@@ -61,8 +67,8 @@ MACOSX_DEPLOYMENT_TARGET=26.0 cargo test --workspace          # 6/6
 cargo fmt --manifest-path crates/platform-macos/Cargo.toml --check
 MACOSX_DEPLOYMENT_TARGET=26.0 cargo clippy --manifest-path crates/platform-macos/Cargo.toml --all-targets -- -D warnings
 cd crates/platform-macos
-MACOSX_DEPLOYMENT_TARGET=26.0 cargo test                      # 15/15
-MACOSX_DEPLOYMENT_TARGET=26.0 cargo build --bin ax-probe
+MACOSX_DEPLOYMENT_TARGET=26.0 cargo test                      # 17/17
+MACOSX_DEPLOYMENT_TARGET=26.0 cargo build --bin ax-probe --bin ax-keyboard
 
 # native (owner host): harness from spike branch @ 0eb9a25
 git show spike/macos-spike-1:spikes/macos/spike-macos.swift > /tmp/spike-macos.swift
@@ -73,6 +79,13 @@ swiftc -O /tmp/spike-macos.swift -o /tmp/spike-macos && /tmp/spike-macos spawn-t
 ./target/debug/ax-probe raise --target <pid> --token <hex>                          # mutate
 ./target/debug/ax-probe set-frame <pid> 120 120 420 312                             # exit 5 (no token)
 kill <pid>; ./target/debug/ax-probe frame <pid>                                    # exit 4 (stale)
+
+# M2 keyboard-first (explicit one-shot actions on the registered fixture)
+./target/debug/ax-keyboard select --target <pid> --token <hex>                      # validate fixture
+./target/debug/ax-keyboard move --target <pid> --token <hex> 120 120                # explicit move
+./target/debug/ax-keyboard resize --target <pid> --token <hex> 480 320              # explicit resize
+./target/debug/ax-keyboard raise --target <pid> --token <hex>                       # explicit raise
+./target/debug/ax-keyboard move <pid> 120 120                                       # exit 5 (no token)
 ```
 
 Note: `MACOSX_DEPLOYMENT_TARGET=26.0` needed only because the owner's rustc (Homebrew 1.98.1) ships a std built for macOS 26; default x86_64 min is 10.12. Not a code issue.
