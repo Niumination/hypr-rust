@@ -50,7 +50,11 @@ A small M2 that drives the M1 adapter from **explicit keyboard-first actions** o
 - [x] Native rerun on the owner host (2026-10-19): select ok · no-token move → exit 5 · move ok · resize ok · raise ok · invalid resize (0 h) → exit 1, window unchanged · stale → exit 4.
 - [x] No Spaces/private-API/general-Mac claims in docs.
 
-## Native rerun (verbatim, 2026-10-19, token redacted)
+## Native rerun (historical, verbatim, 2026-10-19, token redacted)
+
+Captured on the pre-formatter head (`055e136` era). Exit codes and success
+outputs are unchanged; the only later change is that the no-token error line
+now additionally prints `rollback_restored=n/a; frame=<unavailable> (precondition failure before AX)`.
 
 ```
 $ ax-keyboard select --target <pid> --token <hex>
