@@ -9,6 +9,9 @@
 
 ## 1. Artifact map (all public)
 
+`Commit` = latest **code** commit for that row's content. A docs-only tip may
+sit above it.
+
 | Branch | Commit | PR | Content |
 |---|---|---|---|
 | `main` | `07f6059` | — | Doc bundle; Hackintosh host profile; arena brief; M1 AX adapter merged |
