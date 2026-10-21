@@ -14,11 +14,11 @@ sit above it.
 
 | Branch | Commit | PR | Content |
 |---|---|---|---|
-| `main` | `07f6059` | — | Doc bundle; Hackintosh host profile; arena brief; M1 AX adapter merged |
+| `main` | `efaaba4` | — | Doc bundle; Hackintosh host profile; arena brief; M1 AX adapter + M2 keyboard-first merged |
 | `spike/macos-spike-1` | `0eb9a25` | [#1](https://github.com/Niumination/hypr-rust/pull/1) | Swift AX spike (Dock mutation removed), Spaces DISABLED, host-label reconciliation, lifecycle-bounded fixture registration (token + flock, no unused helpers, token not printed) |
 | `core/tiling-constraints` | `51cfced` | [#2](https://github.com/Niumination/hypr-rust/pull/2) | Min-size constraints + overflow policy (13 tests) |
 | `macos/tahoe-ax-adapter-m1` | `e78d104` | [#3](https://github.com/Niumination/hypr-rust/pull/3) | M1 Rust AX adapter (rollback on all post-mutation failures + flock-gated registration, EWOULDBLOCK-only lock check); merged to main |
-| `macos/m2-keyboard-plan` | `1b022a7` | [#4](https://github.com/Niumination/hypr-rust/pull/4) | M2 keyboard-first plan + `ax-keyboard` implementation (select/move/resize/raise); all-variants error formatter + dispatch |
+| `macos/m2-keyboard-plan` | `1b022a7` | [#4](https://github.com/Niumination/hypr-rust/pull/4) | M2 keyboard-first plan + `ax-keyboard` implementation (select/move/resize/raise); all-variants error formatter + dispatch; merged to main |
 
 Platform-macos is deliberately **outside** workspace members: `cargo build/test --workspace` stays Windows-safe; the macOS crate is built via its own manifest (see §4).
 

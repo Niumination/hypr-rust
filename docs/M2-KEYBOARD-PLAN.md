@@ -1,6 +1,6 @@
 # M2 — Keyboard-first flow on self-owned fixture (macOS Tahoe)
 
-**Status:** IMPLEMENTED (2026-10-19). Awaiting re-review.
+**Status:** MERGED (2026-10-21) to main (`efaaba4`). Arena review rounds 1-6: no blocking findings.
 **Base:** M1 head `e78d104` (PR #3, merged). Branch: `macos/m2-keyboard-plan`.
 **Host:** owner ThinkPad X13 Yoga Gen 1, macOS Tahoe 26.7.1 (Hackintosh). Proves only this host/build.
 **Implementation:** `crates/platform-macos/src/bin/ax-keyboard.rs` — explicit one-shot actions (`select` / `move` / `resize` / `raise`) on the registered fixture, gated by the shared fixture verification (`src/fixture.rs`). No loop, no global hotkey, no auto-tiling.
