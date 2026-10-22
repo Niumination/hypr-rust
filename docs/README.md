@@ -1,7 +1,7 @@
 # Hypr-Rust — Engineering Documentation
 
-**Status:** Interview baseline / pre-implementation; feasibility validation pending  
-**Document date:** 2026-10-17  
+**Status:** Interview baseline / pre-implementation; native macOS M1/M2 single-window proof (host-bound); native batch multi-window DEFERRED under strict no-partial ([ADR-0004](./adr/0004-batch-multiwindow-deferred-no-partial.md))  
+**Document date:** 2026-10-17 (updated 2026-10-22)  
 **Working name:** Hypr-Rust (placeholder; do not imply affiliation with Hyprland)
 
 ## Executive summary
@@ -15,7 +15,7 @@ Build a Rust application that reproduces the *tiling workflow and user-facing co
 - **Workspace:** native Windows Virtual Desktop/macOS Spaces only, optional per platform and gated by proof using public APIs. Never emulate with minimize/hide. If unsupported, disable the workspace feature on that platform and explain why.
 - **Explicitly out of scope for MVP:** replacement display server/compositor; Wayland protocol hosting on Windows/macOS; universal interception of every app; pixel-identical Hyprland rendering/effects; Linux support unless separately approved.
 
-The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md); shared core/platform adapters in [ADR-0002](./adr/0002-core-and-platform-adapters.md); and the native-workspace no-emulation policy in [ADR-0003](./adr/0003-native-workspaces.md). The PRD records interview decisions; the other documents define architecture, REA-assisted research, validation and staged delivery.
+The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md); shared core/platform adapters in [ADR-0002](./adr/0002-core-and-platform-adapters.md); the native-workspace no-emulation policy in [ADR-0003](./adr/0003-native-workspaces.md); and the strict no-partial deferral of native batch multi-window in [ADR-0004](./adr/0004-batch-multiwindow-deferred-no-partial.md). The PRD records interview decisions; the other documents define architecture, REA-assisted research, validation and staged delivery.
 
 ## Document map
 
@@ -25,11 +25,15 @@ The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md)
 4. [Quality, testing and release plan](./QUALITY.md)
 5. [Roadmap and milestones](./ROADMAP.md)
 6. [Native platform spike protocol](./PLATFORM-SPIKES.md)
-7. [OpenCode / Hermes handoff plan](./AGENT-HANDOFF.md)
-8. [ADR-0001: native window manager, not compositor port](./adr/0001-product-boundary.md)
-9. [ADR-0002: shared core + OS adapters](./adr/0002-core-and-platform-adapters.md)
-10. [ADR-0003: native workspace capability gate; no hide/minimize emulation](./adr/0003-native-workspaces.md)
-11. [Agent workflow inspired by Karpathy's engineering heuristics](./AGENT-WORKFLOW.md)
+7. [Current user device profile](./USER-DEVICE-PROFILE.md)
+8. [macOS Tahoe next implementation stage](./MACOS-TAHOE-NEXT-STAGE.md)
+9. [Read-only system information collection](./SYSTEM-INFO-COLLECTION.md)
+10. [OpenCode / Hermes handoff plan](./AGENT-HANDOFF.md)
+11. [ADR-0001: native window manager, not compositor port](./adr/0001-product-boundary.md)
+12. [ADR-0002: shared core + OS adapters](./adr/0002-core-and-platform-adapters.md)
+13. [ADR-0003: native workspace capability gate; no hide/minimize emulation](./adr/0003-native-workspaces.md)
+14. [Agent workflow inspired by Karpathy's engineering heuristics](./AGENT-WORKFLOW.md)
+15. [ADR-0004: batch multi-window deferred under strict no-partial requirement](./adr/0004-batch-multiwindow-deferred-no-partial.md)
 
 ## Non-goals and important caveats
 
@@ -40,8 +44,26 @@ The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md)
 
 ## Current implementation state
 
-The workspace contains a platform-neutral layout-core (deterministic BSP / master-stack / monocle / columns / rows planner, now with per-window minimum-size constraints, a documented clamp-and-report overflow policy, and golden + property-style tests) plus the macOS native spike evidence. The scaffold compiles and passes its test suite on this machine (macOS 26.7.1, Intel, Rust 1.98.1); see `docs/PLATFORM-SPIKES.md`. It is **not yet a usable desktop app**: Windows/macOS adapters, tray/menu-bar UI, settings UI, global hotkeys, packaging and native workspace implementation are outstanding.
+**Pure layout planner — no OS control (owner-reported):**
+
+- Platform-neutral `layout-core` scaffold; fmt/clippy clean and 6 tests passing (owner-reported).
+
+**Native control proof — single fixture window only (host-bound, owner-reported):**
+
+- M1 Rust macOS AX adapter — single self-owned window frame/move/resize/raise + stale handling (native-verified on the owner's host; see `docs/reports/MACOS-M1-AX-ADAPTER-2026-10-18.md`).
+- M2 keyboard-first `ax-keyboard` — explicit select/move/resize/raise on the registered fixture (Jalur A PASS, host-bound: ThinkPad X13 Yoga Gen 1, macOS Tahoe 26.7.1).
+
+**Read-only research — not control evidence:**
+
+- Multi-window probe — AX enumeration + geometry reads for 2/3 fixture windows, **no AX writes**; it is **not** evidence of multi-window control or batch atomicity (owner-reported).
+
+**Does not exist — no production desktop app:**
+
+- Native **batch multi-window application is DEFERRED / BLOCKED** under the strict no-partial requirement ([ADR-0004](./adr/0004-batch-multiwindow-deferred-no-partial.md)); pure layout planning may continue.
+- Executor, Windows adapter, tray/menu-bar UI, settings UI, global hotkeys and packaging are all outstanding. Apple Mac and macOS Ventura 13+ are **not** validated by this evidence; no cross-platform parity is claimed.
+
+The macOS spike reports ordinary AX control on a self-owned test window and disables Spaces. The host label conflict (system `MacBookPro16,2` vs owner ThinkPad X13 Yoga) is reconciled in the M1 report §1. PR #1 (Swift spike) and PR #2 (min-size constraints) remain open. See [user device profile](./USER-DEVICE-PROFILE.md), [macOS next stage](./MACOS-TAHOE-NEXT-STAGE.md), and [handoff plan](./AGENT-HANDOFF.md).
 
 ## Definition of success for the first usable release
 
-A user can install the app on Windows 11 x64 or Intel macOS Ventura 13+, configure it in the settings UI, explicitly opt into auto-tiling, and manage supported windows with layouts and platform-appropriate shortcuts. The app leaves window geometry as last accepted on quit. Native workspace shortcuts are available only on platforms/builds where public-API behavior is verified; unsupported workspace features are clearly disabled, never emulated by hiding/minimizing windows.
+The planned app will manage supported windows with shared layouts and native adapters. The current implementation milestone is a narrow macOS Tahoe 26.7.1 Rust AX proof on the user's ThinkPad X13 Yoga Gen 1; this host-specific result does not establish Apple hardware or older macOS support. Windows 11 native work is deferred until the device boots Windows. Native macOS workspaces remain disabled. Product-wide compatibility claims wait for platform evidence.

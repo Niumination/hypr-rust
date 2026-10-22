@@ -1,0 +1,20 @@
+[package]
+name = "hypr-rust-platform-macos"
+version = "0.1.0"
+edition = "2021"
+
+# NOT a workspace member: the crate links Apple frameworks and only builds
+# on macOS. Keep it out of `members` so `cargo build/test --workspace`
+# stays valid on Windows. Build/test it explicitly:
+#   cargo fmt --manifest-path crates/platform-macos/Cargo.toml --check
+#   MACOSX_DEPLOYMENT_TARGET=26.0 cargo clippy --manifest-path crates/platform-macos/Cargo.toml --all-targets -- -D warnings
+#   MACOSX_DEPLOYMENT_TARGET=26.0 cargo test -p hypr-rust-platform-macos
+
+[dependencies]
+hypr-rust-layout-core = { path = "../layout-core" }
+
+# Standalone workspace root: this package lives inside the repo directory
+# but is intentionally NOT a member of the parent workspace (it links
+# Apple frameworks and only builds on macOS). The empty [workspace] table
+# tells cargo to treat this manifest as its own workspace.
+[workspace]
