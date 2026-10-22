@@ -46,6 +46,7 @@ pub struct Placement {
 pub enum LayoutError {
     InvalidBounds,
     InvalidConfig,
+    InvalidConstraints,
     DuplicateWindowId,
     InsufficientSpace,
 }
@@ -55,6 +56,9 @@ impl fmt::Display for LayoutError {
         match self {
             Self::InvalidBounds => write!(f, "display bounds must be finite and positive"),
             Self::InvalidConfig => write!(f, "layout gaps/ratio are outside valid bounds"),
+            Self::InvalidConstraints => {
+                write!(f, "window minimum sizes must be finite and non-negative")
+            }
             Self::DuplicateWindowId => write!(f, "window IDs in one layout must be unique"),
             Self::InsufficientSpace => write!(f, "usable area is too small for requested gaps"),
         }
@@ -166,9 +170,10 @@ pub struct LayoutResult {
 ///
 /// # Validation
 ///
-/// Input validation (bounds finiteness/positivity, config bounds, duplicate
-/// window IDs) happens here, before any geometry is computed; the public
-/// entry points are the only validation boundary.
+/// Input validation (bounds finiteness/positivity, config bounds, per-window
+/// minimum sizes finite and non-negative, duplicate window IDs) happens here,
+/// before any geometry is computed; the public entry points are the only
+/// validation boundary.
 ///
 /// # Overflow policy (documented, see ARCHITECTURE §6)
 ///
@@ -193,6 +198,9 @@ pub fn compute_layout_constrained(
     let mut seen = HashSet::with_capacity(windows.len());
     if windows.iter().any(|window| !seen.insert(window.id)) {
         return Err(LayoutError::DuplicateWindowId);
+    }
+    for window in windows {
+        validate_constraints(window.constraints)?;
     }
     if windows.is_empty() {
         return Ok(LayoutResult {
@@ -282,8 +290,9 @@ fn clamp_to_minimum(
     constraints: WindowConstraints,
     work_area: Rect,
 ) -> (Rect, Option<LayoutDiagnostic>) {
-    let min_w = constraints.min_width.max(0.0);
-    let min_h = constraints.min_height.max(0.0);
+    // Constraints are validated by the public entry point (finite, non-negative).
+    let min_w = constraints.min_width;
+    let min_h = constraints.min_height;
     if rect.width >= min_w && rect.height >= min_h {
         return (rect, None);
     }
@@ -313,6 +322,17 @@ fn clamp_to_minimum(
         }
     };
     (clamped, Some(diagnostic))
+}
+
+fn validate_constraints(constraints: WindowConstraints) -> Result<(), LayoutError> {
+    if !constraints.min_width.is_finite()
+        || !constraints.min_height.is_finite()
+        || constraints.min_width < 0.0
+        || constraints.min_height < 0.0
+    {
+        return Err(LayoutError::InvalidConstraints);
+    }
+    Ok(())
 }
 
 fn validate_config(config: LayoutConfig) -> Result<(), LayoutError> {
@@ -776,6 +796,47 @@ mod tests {
                 available_h: 280.0,
             }]
         );
+    }
+
+    #[test]
+    fn rejects_invalid_minimum_size_constraints() {
+        let bounds = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let invalid = [
+            WindowConstraints {
+                min_width: -1.0,
+                min_height: 0.0,
+            },
+            WindowConstraints {
+                min_width: 0.0,
+                min_height: -5.0,
+            },
+            WindowConstraints {
+                min_width: f64::NAN,
+                min_height: 0.0,
+            },
+            WindowConstraints {
+                min_width: 0.0,
+                min_height: f64::NAN,
+            },
+            WindowConstraints {
+                min_width: f64::INFINITY,
+                min_height: 0.0,
+            },
+            WindowConstraints {
+                min_width: 0.0,
+                min_height: f64::NEG_INFINITY,
+            },
+        ];
+        for constraints in invalid {
+            let input = vec![ConstrainedWindow {
+                id: WindowId(0),
+                constraints,
+            }];
+            assert_eq!(
+                compute_layout_constrained(bounds, &input, LayoutKind::Monocle, test_config()),
+                Err(LayoutError::InvalidConstraints)
+            );
+        }
     }
 
     /// xorshift64-style deterministic PRNG (std-only; no test deps).
