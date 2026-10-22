@@ -14,7 +14,7 @@ sit above it.
 
 | Branch | Commit | PR | Content |
 |---|---|---|---|
-| `main` | `efaaba4` (docs tip `736a1b9`) | — | Doc bundle; Hackintosh host profile; arena brief; M1 AX adapter + M2 keyboard-first merged; ADR-0004 batch deferral (docs tip) |
+| `main` | `efaaba4` | — | Code bundle: M1 AX adapter + M2 keyboard-first merged. Later docs-only commits add the Hackintosh host profile, this brief, and ADR-0004 — the row points to the code commit; docs tips are not pinned |
 | `spike/macos-spike-1` | `0eb9a25` | [#1](https://github.com/Niumination/hypr-rust/pull/1) | Swift AX spike (Dock mutation removed), Spaces DISABLED, host-label reconciliation, lifecycle-bounded fixture registration (token + flock, no unused helpers, token not printed) |
 | `core/tiling-constraints` | `51cfced` | [#2](https://github.com/Niumination/hypr-rust/pull/2) | Min-size constraints + overflow policy (13 tests) |
 | `macos/tahoe-ax-adapter-m1` | `e78d104` | [#3](https://github.com/Niumination/hypr-rust/pull/3) | M1 Rust AX adapter (rollback on all post-mutation failures + flock-gated registration, EWOULDBLOCK-only lock check); merged to main |

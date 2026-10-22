@@ -44,7 +44,25 @@ The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md)
 
 ## Current implementation state
 
-The upstream `main` branch contains the platform-neutral layout-core scaffold (fmt/clippy/6 tests passing) plus the merged M1 Rust macOS AX adapter and M2 keyboard-first plan (merged; `ax-keyboard` select/move/resize/raise on the registered self-owned fixture). Native M2 (Jalur A) PASS is host-bound (ThinkPad X13 Yoga Gen 1, macOS Tahoe 26.7.1, self-owned fixture) and does not validate Apple hardware or older macOS. A read-only 2/3-window probe confirmed AX enumeration and geometry reads with no AX writes. Native **batch multi-window application is DEFERRED / BLOCKED** under the strict no-partial requirement ([ADR-0004](./adr/0004-batch-multiwindow-deferred-no-partial.md)); pure layout planning may continue. PR #1 (Swift spike) and PR #2 (min-size constraints) remain open. The macOS spike reports ordinary AX control on a self-owned test window and disables Spaces. The host label conflict (system `MacBookPro16,2` vs owner ThinkPad X13 Yoga) is reconciled in the M1 report §1. This remains **not a usable desktop app**: executor, Windows adapter, tray/menu-bar UI, settings UI, global hotkeys and packaging are outstanding. See [user device profile](./USER-DEVICE-PROFILE.md), [macOS next stage](./MACOS-TAHOE-NEXT-STAGE.md), and [handoff plan](./AGENT-HANDOFF.md).
+**Pure layout planner — no OS control (owner-reported):**
+
+- Platform-neutral `layout-core` scaffold; fmt/clippy clean and 6 tests passing (owner-reported).
+
+**Native control proof — single fixture window only (host-bound, owner-reported):**
+
+- M1 Rust macOS AX adapter — single self-owned window frame/move/resize/raise + stale handling (native-verified on the owner's host; see `docs/reports/MACOS-M1-AX-ADAPTER-2026-10-18.md`).
+- M2 keyboard-first `ax-keyboard` — explicit select/move/resize/raise on the registered fixture (Jalur A PASS, host-bound: ThinkPad X13 Yoga Gen 1, macOS Tahoe 26.7.1).
+
+**Read-only research — not control evidence:**
+
+- Multi-window probe — AX enumeration + geometry reads for 2/3 fixture windows, **no AX writes**; it is **not** evidence of multi-window control or batch atomicity (owner-reported).
+
+**Does not exist — no production desktop app:**
+
+- Native **batch multi-window application is DEFERRED / BLOCKED** under the strict no-partial requirement ([ADR-0004](./adr/0004-batch-multiwindow-deferred-no-partial.md)); pure layout planning may continue.
+- Executor, Windows adapter, tray/menu-bar UI, settings UI, global hotkeys and packaging are all outstanding. Apple Mac and macOS Ventura 13+ are **not** validated by this evidence; no cross-platform parity is claimed.
+
+The macOS spike reports ordinary AX control on a self-owned test window and disables Spaces. The host label conflict (system `MacBookPro16,2` vs owner ThinkPad X13 Yoga) is reconciled in the M1 report §1. PR #1 (Swift spike) and PR #2 (min-size constraints) remain open. See [user device profile](./USER-DEVICE-PROFILE.md), [macOS next stage](./MACOS-TAHOE-NEXT-STAGE.md), and [handoff plan](./AGENT-HANDOFF.md).
 
 ## Definition of success for the first usable release
 

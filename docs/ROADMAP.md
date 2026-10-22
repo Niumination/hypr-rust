@@ -93,8 +93,14 @@ One engineer may cover multiple roles; unsafe FFI and permission-sensitive work 
 
 ## Immediate next actions
 
-1. Create issues for the two parallel platform feasibility spikes.
-2. Define the exact workspace operation checklist and capture a go/no-go result per OS.
-3. Select representative apps for developer and general-use validation.
-4. Implement the shared geometry/layout core and one end-to-end layout per OS.
-5. Update the supported-capability matrix from test evidence before adding workspace shortcuts to UI.
+**Validated (2026-10-22):** macOS Tahoe single-window M1/M2 (AX adapter + `ax-keyboard` select/move/resize/raise) on the owner's ThinkPad X13 Yoga Gen 1, macOS Tahoe 26.7.1 build 25G241 — owner-reported, host-bound; does not cover Apple Mac or Ventura. Native batch multi-window is **DEFERRED** ([ADR-0004](./adr/0004-batch-multiwindow-deferred-no-partial.md)).
+
+**Planned (not yet validated):**
+
+1. Windows 11 feasibility spike — waits for a Windows boot; no Windows runtime evidence yet.
+2. macOS Ventura 13+ / Apple-Mac validation — future target, still unverified.
+3. Pure layout Phase 1 (shared geometry/layout core; BSP/master-stack) — may proceed now, no OS side effects.
+4. Define the exact workspace operation checklist and capture a go/no-go result per OS.
+5. Select representative apps for developer and general-use validation.
+6. One end-to-end multi-window layout per OS — blocked until the native batch gate reopens (ADR-0004).
+7. Update the supported-capability matrix from test evidence before adding workspace shortcuts to UI.
