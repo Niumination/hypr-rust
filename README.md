@@ -1,6 +1,6 @@
 # Hypr-Rust
 
-**Current state:** documentation + first platform-neutral layout-core scaffold. This is not yet a usable desktop app: native adapters, tray/menu-bar UI, settings UI, hotkeys and platform probes remain to be implemented and tested.
+**Current state:** documentation + platform-neutral layout-core scaffold + narrow single-window macOS AX control proof (M1 adapter + M2 `ax-keyboard`; host-bound, owner-reported; the read-only 2/3-window enumeration/geometry probe is separate and is not control evidence). Not yet a usable desktop app: batch multi-window application is DEFERRED ([ADR-0004](docs/adr/0004-batch-multiwindow-deferred-no-partial.md)); Windows adapter, tray/menu-bar UI, settings UI, hotkeys and packaging remain to be implemented and tested.
 
 ## Project boundary
 
