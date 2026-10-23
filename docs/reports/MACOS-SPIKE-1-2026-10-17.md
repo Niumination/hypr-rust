@@ -113,3 +113,9 @@ Mesin/build sama, harness tidak berubah. Toolchain re-verify: fmt OK, clippy cle
 8. Kill target, ulangi `run-tests --pid <pid>` → clean error
 
 **Verifikasi eksternal:** semua commit + PR ter-push ke `github.com:Niumination/hypr-rust` (public) — dapat direview dari arena.ai.
+
+## 10. Update (23 Okt 2026) — flag `spawn-target --no-register`
+
+- `spawn-target` kini menerima `--no-register`: window self-owned yang sama **tanpa** fixture lock/registrasi — target batch tambahan saja, tidak pernah bisa menjadi batch master (`ax-probe batch` tetap mewajibkan registrasi fixture untuk `--target`). `fflush(stdout)` ditambahkan agar PID terbaca saat output di-redirect.
+- Reproduksi two-window (harness ini + `ax-probe batch` dari `work/phase1-domain@085f5cb`): sukses dua-window (dua frame applied + read-back cocok, exit 0) dan rollback dua-window (target-3 gagal `-25204` → kedua window dikembalikan & diverifikasi, exit 1). Detail + caveat: `docs/ARENA-VERIFICATION.md` §6 di branch `work/phase1-domain`.
+- Catatan kejujuran: checklist item 6 & 8 pada §9 masih menyebut mode `run-tests --pid` yang **sudah dihapus** (commit 5d16063/0eb9a25) — ikuti header komentar harness; mutator kini Rust `ax-probe` yang gated.

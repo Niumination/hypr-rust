@@ -7,10 +7,11 @@
 // Modes:
 //   record                 Spike 0 environment record + window discovery (read-only)
 //   spawn-target           Start a controlled target window; registers it as the
-//                          self-owned mutation fixture (token + liveness lock),
-//                          registers it as the self-owned mutation fixture
-//                          (token in owner-only file + liveness lock), prints
-//                          its PID, stays alive
+//                          self-owned mutation fixture (token in owner-only file
+//                          + liveness lock), prints its PID, stays alive.
+//                          `--no-register` starts the same self-owned window
+//                          WITHOUT the lock/registration: an auxiliary batch
+//                          target only — it can never act as the batch master.
 //   space-observe          Listen for NSWorkspace.activeSpaceDidChangeNotification (30 s)
 //   space-switch --dir right|left [--pid <n>]  Post public CGEvent Ctrl+Arrow, observe space change
 //
@@ -240,28 +241,30 @@ func removeRegistration() {
 
 // MARK: - Controlled target window (our own app; never a user window)
 
-func spawnTarget() {
+func spawnTarget(register: Bool) {
     let app = NSApplication.shared
     app.setActivationPolicy(.regular)
 
-    // Fail closed: no lock and no registration -> do not expose a fixture.
-    guard let lockFD = acquireFixtureLock() else {
-        FileHandle.standardError.write("error: fixture lock acquisition failed\n".data(using: .utf8)!)
-        exit(5)
-    }
-    let token = UUID().uuidString.replacingOccurrences(of: "-", with: "")
-    guard writeRegistration(token: token) else {
-        FileHandle.standardError.write("error: fixture registration failed\n".data(using: .utf8)!)
-        close(lockFD)
-        exit(5)
-    }
-
-    // Remove the registration on normal termination; the flock backstop covers
-    // abrupt termination.
-    NotificationCenter.default.addObserver(
-        forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { _ in
-            removeRegistration()
+    if register {
+        // Fail closed: no lock and no registration -> do not expose a fixture.
+        guard let lockFD = acquireFixtureLock() else {
+            FileHandle.standardError.write("error: fixture lock acquisition failed\n".data(using: .utf8)!)
+            exit(5)
+        }
+        let token = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        guard writeRegistration(token: token) else {
+            FileHandle.standardError.write("error: fixture registration failed\n".data(using: .utf8)!)
             close(lockFD)
+            exit(5)
+        }
+
+        // Remove the registration on normal termination; the flock backstop covers
+        // abrupt termination.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { _ in
+                removeRegistration()
+                close(lockFD)
+        }
     }
 
     let win = NSWindow(
@@ -273,9 +276,17 @@ func spawnTarget() {
     win.makeKeyAndOrderFront(nil)
     app.activate(ignoringOtherApps: true)
 
-    print("fixture registered at ~/.hypr-rust/fixture-target.json (owner-only, token NOT printed — read from file)")
-    print("HYPR-SPIKE-TARGET pid=\(getpid()) frame=\(win.frame)")
-    print("fixture registered at ~/.hypr-rust/fixture-target.json (lock held for process lifetime)")
+    if register {
+        print("fixture registered at ~/.hypr-rust/fixture-target.json (owner-only, token NOT printed — read from file)")
+        print("HYPR-SPIKE-TARGET pid=\(getpid()) frame=\(win.frame)")
+        print("fixture registered at ~/.hypr-rust/fixture-target.json (lock held for process lifetime)")
+    } else {
+        // Auxiliary batch target: self-owned window without fixture authority.
+        // It is a valid geometry target, never a master and never a registration owner.
+        print("HYPR-SPIKE-TARGET pid=\(getpid()) frame=\(win.frame)")
+        print("unregistered auxiliary window: no fixture lock, no registration")
+    }
+    fflush(stdout)  // keep the PID readable when stdout is redirected
     print("keep this process running while the Rust probe executes…")
     app.run()
     exit(0)
@@ -296,12 +307,12 @@ case "record":
     osRecord()
     discover()
 case "spawn-target":
-    spawnTarget()
+    spawnTarget(register: !args.contains("--no-register"))
 case "space-observe":
     spaceObserve(seconds: Double(argValue("--seconds") ?? "30") ?? 30)
 case "space-switch":
     spaceSwitch(dir: argValue("--dir") ?? "right", pid: (argValue("--pid")).flatMap(pid_t.init),
                 execute: args.contains("--execute"))
 default:
-    print("modes: record | spawn-target | space-observe [--seconds n] | space-switch --dir right|left [--pid pid] [--execute]")
+    print("modes: record | spawn-target [--no-register] | space-observe [--seconds n] | space-switch --dir right|left [--pid pid] [--execute]")
 }
