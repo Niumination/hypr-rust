@@ -9,9 +9,12 @@
 //   spawn-target           Start a controlled target window; registers it as the
 //                          self-owned mutation fixture (token in owner-only file
 //                          + liveness lock), prints its PID, stays alive.
-//                          `--no-register` starts the same self-owned window
-//                          WITHOUT the lock/registration: an auxiliary batch
-//                          target only — it can never act as the batch master.
+//                          `--count <n>` opens n windows in the SAME process
+//                          (all registered to one fixture) so the adapter can
+//                          exercise per-window runtime identity.
+//                          `--no-register` starts the same self-owned window(s)
+//                          WITHOUT the lock/registration: auxiliary batch
+//                          target(s) only — they can never act as the batch master.
 //   space-observe          Listen for NSWorkspace.activeSpaceDidChangeNotification (30 s)
 //   space-switch --dir right|left [--pid <n>]  Post public CGEvent Ctrl+Arrow, observe space change
 //
@@ -241,7 +244,7 @@ func removeRegistration() {
 
 // MARK: - Controlled target window (our own app; never a user window)
 
-func spawnTarget(register: Bool) {
+func spawnTarget(register: Bool, count: Int) {
     let app = NSApplication.shared
     app.setActivationPolicy(.regular)
 
@@ -267,24 +270,47 @@ func spawnTarget(register: Bool) {
         }
     }
 
-    let win = NSWindow(
-        contentRect: NSRect(x: 100, y: 100, width: 420, height: 280),
-        styleMask: [.titled, .resizable],
-        backing: .buffered, defer: false)
-    win.title = "HYPR-SPIKE-TARGET"  // Controlled test window; title is a fixed marker, not user data.
-    win.isReleasedWhenClosed = false
-    win.makeKeyAndOrderFront(nil)
+    // Every window belongs to THIS process, so the adapter can exercise
+    // per-window runtime identity instead of one window per pid. Positions are
+    // fixed so a multi-window fixture is reproducible; titles are fixed markers
+    // (never read by the probe).
+    let origins = [
+        NSPoint(x: 100, y: 100),
+        NSPoint(x: 620, y: 420),
+        NSPoint(x: 1140, y: 100),
+        NSPoint(x: 620, y: 100),
+    ]
+    var windows: [NSWindow] = []
+    for index in 0..<count {
+        let origin = origins[index % origins.count]
+        let win = NSWindow(
+            contentRect: NSRect(x: origin.x, y: origin.y, width: 420, height: 280),
+            styleMask: [.titled, .resizable],
+            backing: .buffered, defer: false)
+        win.title = index == 0 ? "HYPR-SPIKE-TARGET" : "HYPR-SPIKE-TARGET-\(index)"
+        win.isReleasedWhenClosed = false
+        windows.append(win)
+    }
+    for win in windows {
+        win.makeKeyAndOrderFront(nil)
+    }
+    // The primary window stays key, so AX reports it as the focused window.
+    windows[0].makeKeyAndOrderFront(nil)
     app.activate(ignoringOtherApps: true)
 
     if register {
         print("fixture registered at ~/.hypr-rust/fixture-target.json (owner-only, token NOT printed — read from file)")
-        print("HYPR-SPIKE-TARGET pid=\(getpid()) frame=\(win.frame)")
+        for win in windows {
+            print("HYPR-SPIKE-TARGET pid=\(getpid()) frame=\(win.frame)")
+        }
         print("fixture registered at ~/.hypr-rust/fixture-target.json (lock held for process lifetime)")
     } else {
-        // Auxiliary batch target: self-owned window without fixture authority.
-        // It is a valid geometry target, never a master and never a registration owner.
-        print("HYPR-SPIKE-TARGET pid=\(getpid()) frame=\(win.frame)")
-        print("unregistered auxiliary window: no fixture lock, no registration")
+        // Auxiliary batch targets: self-owned windows without fixture authority.
+        // They are valid geometry targets, never a master and never a registration owner.
+        for win in windows {
+            print("HYPR-SPIKE-TARGET pid=\(getpid()) frame=\(win.frame)")
+        }
+        print("unregistered auxiliary windows: no fixture lock, no registration")
     }
     fflush(stdout)  // keep the PID readable when stdout is redirected
     print("keep this process running while the Rust probe executes…")
@@ -302,12 +328,20 @@ func argValue(_ name: String) -> String? {
     return args[i + 1]
 }
 
+/// Window count for `spawn-target --count <n>` (default 1, clamped to >= 1).
+func spawnCount(_ args: [String]) -> Int {
+    guard let i = args.firstIndex(of: "--count"), i + 1 < args.count, let n = Int(args[i + 1]) else {
+        return 1
+    }
+    return max(1, n)
+}
+
 switch mode {
 case "record":
     osRecord()
     discover()
 case "spawn-target":
-    spawnTarget(register: !args.contains("--no-register"))
+    spawnTarget(register: !args.contains("--no-register"), count: spawnCount(args))
 case "space-observe":
     spaceObserve(seconds: Double(argValue("--seconds") ?? "30") ?? 30)
 case "space-switch":

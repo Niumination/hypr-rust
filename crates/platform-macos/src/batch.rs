@@ -15,15 +15,12 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use layout_core::Rect;
+use layout_core::{LayoutPlan, Rect, WindowId};
 
-use crate::adapter::{frames_match, AxError, MacAxAdapter, K_FRAME_TOLERANCE};
+use crate::adapter::{AxError, WindowIdMap};
 use crate::ffi;
 
-/// Opaque target identity. In the probe this is a pid; in the product it is a
-/// runtime window key scoped to one observed snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct WindowKey(pub u32);
+pub use crate::adapter::WindowKey;
 
 /// One desired frame for one target.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -32,8 +29,9 @@ pub struct BatchTarget {
     pub rect: Rect,
 }
 
-/// Injectable per-window seam. The real adapter implements it with AX; unit
-/// tests implement it with scripted outcomes (no Apple frameworks).
+/// Injectable per-window seam. The real adapter implements it with AX
+/// ([`crate::adapter::MacWindowSet`]); unit tests implement it with scripted
+/// outcomes (no Apple frameworks).
 pub trait BatchOps {
     /// Read the current frame of `window`.
     fn read_frame(&self, window: WindowKey) -> Result<Rect, AxError>;
@@ -44,26 +42,26 @@ pub trait BatchOps {
     fn restore(&self, window: WindowKey, before: Rect) -> (bool, Option<Rect>);
 }
 
-impl BatchOps for MacAxAdapter {
-    fn read_frame(&self, window: WindowKey) -> Result<Rect, AxError> {
-        let handle = self.main_window(window.0)?;
-        self.window_frame(&handle)
+/// Map a pure layout plan to native batch targets through one observation's
+/// ID map.
+///
+/// Fails closed: a placement whose domain window ID has no native key in the
+/// map produces no target list, so nothing is written.
+pub fn targets_for_plan(
+    plan: &LayoutPlan,
+    map: &WindowIdMap,
+) -> Result<Vec<BatchTarget>, PlanError> {
+    let mut targets = Vec::with_capacity(plan.placements.len());
+    for placement in &plan.placements {
+        let window = map
+            .get(placement.window)
+            .ok_or(PlanError::UnmappedWindow(placement.window))?;
+        targets.push(BatchTarget {
+            window,
+            rect: placement.rect,
+        });
     }
-
-    fn set_frame(&self, window: WindowKey, rect: Rect) -> Result<Rect, AxError> {
-        let handle = self.main_window(window.0)?;
-        self.set_window_frame(&handle, rect)
-    }
-
-    fn restore(&self, window: WindowKey, before: Rect) -> (bool, Option<Rect>) {
-        match self.set_frame(window, before) {
-            Ok(actual) => (
-                frames_match(before, actual, K_FRAME_TOLERANCE),
-                Some(actual),
-            ),
-            Err(_) => (false, None),
-        }
-    }
+    Ok(targets)
 }
 
 /// Outcome for one window.
@@ -183,16 +181,19 @@ pub enum PlanError {
     InvalidGeometry,
     /// A line could not be parsed.
     Parse,
-    /// The registered fixture is not part of the plan, so the token gate would
-    /// authorize nothing.
-    FixtureNotIncluded,
+    /// A target key was not observed in the process the batch is authorized
+    /// for, so it cannot be resolved to a native window.
+    UnknownTarget(WindowKey),
+    /// A plan placement has no native key in the observation's ID map.
+    UnmappedWindow(WindowId),
     /// The plan file is not owner-only (regular, non-symlink, perm 0600, owned
     /// by the current user).
     NotOwnerOnly,
 }
 
-/// Parse a plan: one target per line as `pid x y width height`. Blank lines and
-/// lines starting with `#` are ignored.
+/// Parse a plan: one target per line as `key x y width height`, where `key` is
+/// a runtime window key from `ax-probe windows <pid>`. Blank lines and lines
+/// starting with `#` are ignored.
 pub fn parse_plan(text: &str) -> Result<Vec<BatchTarget>, PlanError> {
     let mut targets = Vec::new();
     let mut seen = HashSet::new();
@@ -205,7 +206,7 @@ pub fn parse_plan(text: &str) -> Result<Vec<BatchTarget>, PlanError> {
         if parts.len() != 5 {
             return Err(PlanError::Parse);
         }
-        let pid = parts[0].parse::<u32>().map_err(|_| PlanError::Parse)?;
+        let key = parts[0].parse::<u64>().map_err(|_| PlanError::Parse)?;
         let mut nums = [0.0_f64; 4];
         for (slot, part) in nums.iter_mut().zip(parts[1..].iter()) {
             *slot = part.parse::<f64>().map_err(|_| PlanError::Parse)?;
@@ -214,7 +215,7 @@ pub fn parse_plan(text: &str) -> Result<Vec<BatchTarget>, PlanError> {
         if !rect.is_finite_and_positive() {
             return Err(PlanError::InvalidGeometry);
         }
-        let window = WindowKey(pid);
+        let window = WindowKey(key);
         if !seen.insert(window) {
             return Err(PlanError::Duplicate(window));
         }
@@ -250,21 +251,22 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
 
-    /// Scripted [`BatchOps`] mock: no Apple frameworks.
+    /// Scripted [`BatchOps`] mock: no Apple frameworks. Keys are runtime
+    /// window keys, so several keys can describe windows of one process.
     #[derive(Default)]
     struct MockBatch {
-        frames: RefCell<HashMap<u32, Rect>>,
-        fail_set: HashSet<u32>,
-        fail_read: HashSet<u32>,
-        fail_restore: HashSet<u32>,
-        writes: RefCell<Vec<(u32, &'static str)>>,
+        frames: RefCell<HashMap<u64, Rect>>,
+        fail_set: HashSet<u64>,
+        fail_read: HashSet<u64>,
+        fail_restore: HashSet<u64>,
+        writes: RefCell<Vec<(u64, &'static str)>>,
     }
 
     impl MockBatch {
-        fn with(windows: &[(u32, Rect)]) -> Self {
+        fn with(windows: &[(u64, Rect)]) -> Self {
             let mut frames = HashMap::new();
-            for (pid, rect) in windows {
-                frames.insert(*pid, *rect);
+            for (key, rect) in windows {
+                frames.insert(*key, *rect);
             }
             Self {
                 frames: RefCell::new(frames),
@@ -304,9 +306,9 @@ mod tests {
         }
     }
 
-    fn target(pid: u32, x: f64, y: f64, w: f64, h: f64) -> BatchTarget {
+    fn target(key: u64, x: f64, y: f64, w: f64, h: f64) -> BatchTarget {
         BatchTarget {
-            window: WindowKey(pid),
+            window: WindowKey(key),
             rect: Rect::new(x, y, w, h),
         }
     }
@@ -452,6 +454,65 @@ mod tests {
         assert_eq!(
             parse_plan("1 nan 20 400 300"),
             Err(PlanError::InvalidGeometry)
+        );
+    }
+
+    // MARK: - Plan -> native target mapping (pure seam)
+
+    #[test]
+    fn targets_for_plan_maps_two_windows_of_one_process() {
+        use crate::adapter::observation_from_windows;
+        use layout_core::{DisplayId, LayoutConfig, LayoutKind};
+
+        let display = Rect::new(0.0, 0.0, 1200.0, 800.0);
+        // Keys 0 and 1 are two windows of the SAME process.
+        let observation = observation_from_windows(
+            display,
+            &[
+                (WindowKey(0), Rect::new(10.0, 10.0, 200.0, 200.0)),
+                (WindowKey(1), Rect::new(220.0, 10.0, 200.0, 200.0)),
+            ],
+            Some(WindowKey(1)),
+        );
+        let plan = layout_core::plan_snapshot(
+            &observation.snapshot,
+            DisplayId(0),
+            LayoutKind::MasterStack,
+            LayoutConfig::default(),
+            false,
+        )
+        .unwrap();
+        let targets = targets_for_plan(&plan, &observation.map).unwrap();
+        assert_eq!(targets.len(), 2);
+        // Focused window is the master (first), the other keeps its order.
+        assert_eq!(targets[0].window, WindowKey(1));
+        assert_eq!(targets[1].window, WindowKey(0));
+    }
+
+    #[test]
+    fn targets_for_plan_fails_closed_on_unmapped_id() {
+        use crate::adapter::observation_from_windows;
+        use layout_core::{DisplayId, LayoutKind, LayoutPlan, Placement, WindowId};
+
+        let observation = observation_from_windows(
+            Rect::new(0.0, 0.0, 1200.0, 800.0),
+            &[(WindowKey(0), Rect::new(0.0, 0.0, 100.0, 100.0))],
+            None,
+        );
+        let plan = LayoutPlan {
+            source_revision: observation.snapshot.revision,
+            display: DisplayId(0),
+            kind: LayoutKind::Monocle,
+            placements: vec![Placement {
+                window: WindowId(9),
+                rect: Rect::new(0.0, 0.0, 1.0, 1.0),
+            }],
+            diagnostics: Vec::new(),
+            excluded: Vec::new(),
+        };
+        assert_eq!(
+            targets_for_plan(&plan, &observation.map),
+            Err(PlanError::UnmappedWindow(WindowId(9)))
         );
     }
 

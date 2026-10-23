@@ -16,16 +16,22 @@
 //!   probe cannot mutate an arbitrary pid.
 //!
 //! `batch` applies a multi-window plan with **best-effort** rollback
-//! ([ADR-0005](../adr/0005-batch-multiwindow-best-effort-rollback.md)): the
-//! registered fixture must appear in the plan, every target must be alive, and
+//! ([ADR-0005](../adr/0005-batch-multiwindow-best-effort-rollback.md)): every
+//! target key must exist in the registered fixture's enumerated window set and
 //! the plan file must be owner-only. On the first failure the batch stops and
 //! restores every already-changed window, reporting the actual state honestly;
 //! it never claims atomicity.
 //!
+//! `windows <pid>` is read-only: it enumerates the process's `AXWindows` and
+//! prints one runtime window key per window. `apply` runs the full slice on the
+//! registered fixture: snapshot -> pure planner -> native-key mapping -> batch.
+//!
 //! Usage:
 //!   ax-probe frame <pid>
+//!   ax-probe windows <pid>
 //!   ax-probe set-frame --target <pid> --token <hex> <x> <y> <width> <height>
 //!   ax-probe raise --target <pid> --token <hex>
+//!   ax-probe apply --target <pid> --token <hex> --display <x> <y> <w> <h> [--kind <name>]
 //!   ax-probe batch --target <pid> --token <hex> --plan <path>
 //!
 //! Exit codes: 0 ok · 1 error · 3 permission denied · 4 stale target ·
@@ -36,9 +42,9 @@ use std::process::ExitCode;
 
 use hypr_rust_platform_macos::{
     batch::{self, BatchResult, PlanError, WindowOutcome},
-    fixture, process_alive, AxError, FixtureError, MacAxAdapter,
+    fixture, AxError, FixtureError, MacAxAdapter, MacWindowSet, WindowIdMap,
 };
-use layout_core::Rect;
+use layout_core::{DisplayId, LayoutConfig, LayoutKind, LayoutPlan, Rect};
 
 /// Probe-level errors: adapter failures plus the registration failure.
 enum ProbeError {
@@ -48,6 +54,9 @@ enum ProbeError {
     TargetUnregistered,
     /// The batch plan file is missing, unreadable, not owner-only, or invalid.
     Plan(PlanError),
+    /// The pure planner rejected the observation (unknown display, bad
+    /// geometry, duplicate runtime ID).
+    Layout(layout_core::PlanError),
     /// A batch ran and failed; the full result is reported.
     Batch(BatchResult),
 }
@@ -69,6 +78,10 @@ fn main() -> ExitCode {
         }
         Err(ProbeError::Plan(err)) => {
             eprintln!("error: invalid batch plan ({err:?})");
+            ExitCode::FAILURE
+        }
+        Err(ProbeError::Layout(err)) => {
+            eprintln!("error: layout planning failed ({err:?})");
             ExitCode::FAILURE
         }
         Err(ProbeError::Batch(result)) => {
@@ -157,10 +170,48 @@ fn run(args: &[String]) -> Result<(), ProbeError> {
                 }
             }
         }
+        "windows" => {
+            // Read-only: no token required. Lists each runtime window key and
+            // its frame; no titles.
+            let pid: u32 = args[2].parse().map_err(|_| AxError::IllegalArgument)?;
+            let adapter = MacAxAdapter::connect()?;
+            let set = adapter.windows(pid)?;
+            print_windows(&set);
+            Ok(())
+        }
+        "apply" => {
+            // Mutating: token-gated. Snapshots the registered fixture's windows,
+            // computes a pure layout plan, maps it to native keys, and applies
+            // it with best-effort rollback (ADR-0005).
+            let (pid, token) = parse_target_args(args)?;
+            fixture::verify_registration(pid, &token).map_err(map_fixture_error)?;
+            let display = parse_display_arg(args)?;
+            let kind = parse_kind_arg(args)?;
+            let adapter = MacAxAdapter::connect()?;
+            let set = adapter.windows(pid)?;
+            let observation = set.observe(display);
+            let plan = layout_core::plan_snapshot(
+                &observation.snapshot,
+                DisplayId(0),
+                kind,
+                LayoutConfig::default(),
+                false,
+            )
+            .map_err(ProbeError::Layout)?;
+            let targets =
+                batch::targets_for_plan(&plan, &observation.map).map_err(ProbeError::Plan)?;
+            print_plan(&plan, &observation.map);
+            let result = batch::apply_batch(&set, &targets);
+            if result.error.is_some() {
+                return Err(ProbeError::Batch(result));
+            }
+            print_batch_result(&result);
+            Ok(())
+        }
         "batch" => {
-            // Mutating: token-gated like the other mutations. The registered
-            // fixture must be part of the plan so the token authorizes the
-            // batch; every other target must be a live self-owned fixture.
+            // Mutating: token-gated. Every target key must exist in the
+            // registered fixture's window set, so the plan can only reach
+            // windows the fixture was actually observed to own.
             let (pid, token) = parse_target_args(args)?;
             fixture::verify_registration(pid, &token).map_err(map_fixture_error)?;
             let plan_path = parse_plan_arg(args)?;
@@ -168,19 +219,14 @@ fn run(args: &[String]) -> Result<(), ProbeError> {
             let text = std::fs::read_to_string(&plan_path)
                 .map_err(|_| ProbeError::Plan(PlanError::Parse))?;
             let targets = batch::parse_plan(&text).map_err(ProbeError::Plan)?;
-            if !targets
-                .iter()
-                .any(|target| target.window == batch::WindowKey(pid))
-            {
-                return Err(ProbeError::Plan(PlanError::FixtureNotIncluded));
-            }
+            let adapter = MacAxAdapter::connect()?;
+            let set = adapter.windows(pid)?;
             for target in &targets {
-                if !process_alive(target.window.0) {
-                    return Err(ProbeError::Ax(AxError::StaleTarget));
+                if !set.contains(target.window) {
+                    return Err(ProbeError::Plan(PlanError::UnknownTarget(target.window)));
                 }
             }
-            let adapter = MacAxAdapter::connect()?;
-            let result = batch::apply_batch(&adapter, &targets);
+            let result = batch::apply_batch(&set, &targets);
             if result.error.is_some() {
                 return Err(ProbeError::Batch(result));
             }
@@ -241,6 +287,88 @@ fn parse_plan_arg(args: &[String]) -> Result<PathBuf, ProbeError> {
     Err(ProbeError::Plan(PlanError::Parse))
 }
 
+/// Print the windows of a set: key and frame per window. No titles.
+fn print_windows(set: &MacWindowSet) {
+    println!("windows={} pid={}", set.len(), set.pid());
+    for (key, rect) in set.entries() {
+        println!("  key={} frame={}", key.0, fmt_rect(&rect));
+    }
+}
+
+/// Print a computed plan: domain ID -> native key per placement, plus exclusions.
+fn print_plan(plan: &LayoutPlan, map: &WindowIdMap) {
+    println!(
+        "plan: kind={:?} placements={} excluded={}",
+        plan.kind,
+        plan.placements.len(),
+        plan.excluded.len()
+    );
+    for placement in &plan.placements {
+        println!(
+            "  window={:?} key={} rect={}",
+            placement.window,
+            map.get(placement.window)
+                .map(|key| key.0)
+                .map_or_else(|| "none".to_string(), |key| key.to_string()),
+            fmt_rect(&placement.rect)
+        );
+    }
+    for excluded in &plan.excluded {
+        println!(
+            "  excluded window={:?} reason={:?}",
+            excluded.window, excluded.reason
+        );
+    }
+}
+
+/// Parse `--display x y width height`.
+fn parse_display_arg(args: &[String]) -> Result<Rect, ProbeError> {
+    let mut i = 2;
+    while i < args.len() {
+        if args[i] == "--display" {
+            let nums: Vec<f64> = args
+                .iter()
+                .skip(i + 1)
+                .take(4)
+                .map(|arg| arg.parse::<f64>())
+                .collect::<Result<_, _>>()
+                .map_err(|_| ProbeError::Ax(AxError::IllegalArgument))?;
+            if nums.len() != 4 {
+                return Err(ProbeError::Ax(AxError::IllegalArgument));
+            }
+            return Ok(Rect::new(nums[0], nums[1], nums[2], nums[3]));
+        }
+        i += 1;
+    }
+    Err(ProbeError::Ax(AxError::IllegalArgument))
+}
+
+/// Parse `--kind <name>`; defaults to master-stack.
+fn parse_kind_arg(args: &[String]) -> Result<LayoutKind, ProbeError> {
+    let mut i = 2;
+    while i < args.len() {
+        if args[i] == "--kind" {
+            let name = args
+                .get(i + 1)
+                .ok_or(ProbeError::Ax(AxError::IllegalArgument))?;
+            return parse_kind(name).ok_or(ProbeError::Ax(AxError::IllegalArgument));
+        }
+        i += 1;
+    }
+    Ok(LayoutKind::MasterStack)
+}
+
+fn parse_kind(name: &str) -> Option<LayoutKind> {
+    match name {
+        "master-stack" => Some(LayoutKind::MasterStack),
+        "columns" => Some(LayoutKind::Columns),
+        "rows" => Some(LayoutKind::Rows),
+        "bsp" => Some(LayoutKind::Bsp),
+        "monocle" => Some(LayoutKind::Monocle),
+        _ => None,
+    }
+}
+
 /// Print a batch result: one line per target plus the rollback status.
 fn print_batch_result(result: &BatchResult) {
     let applied = result
@@ -265,13 +393,13 @@ fn print_batch_result(result: &BatchResult) {
         match outcome {
             WindowOutcome::Applied { requested, actual } => {
                 println!(
-                    "  pid={} applied requested={requested:?} actual={actual:?}",
+                    "  key={} applied requested={requested:?} actual={actual:?}",
                     window.0
                 );
             }
             WindowOutcome::RolledBack { restored, actual } => {
                 println!(
-                    "  pid={} rolled_back restored={restored:?} actual={actual:?}",
+                    "  key={} rolled_back restored={restored:?} actual={actual:?}",
                     window.0
                 );
             }
@@ -291,19 +419,14 @@ fn map_fixture_error(err: FixtureError) -> ProbeError {
 }
 
 fn print_frame(rect: &Rect) {
-    println!(
-        "ok {{x: {}, y: {}, width: {}, height: {}}}",
-        fmt(rect.x),
-        fmt(rect.y),
-        fmt(rect.width),
-        fmt(rect.height)
-    );
+    println!("{}", fmt_rect(rect));
 }
 
 fn usage() {
     eprintln!(
-        "usage: ax-probe frame <pid>\n       ax-probe set-frame --target <pid> --token <hex> <x> <y> <width> <height>\n       ax-probe raise --target <pid> --token <hex>\n       ax-probe batch --target <pid> --token <hex> --plan <path>   # plan lines: \"pid x y width height\""
+        "usage: ax-probe frame <pid>\n       ax-probe windows <pid>\n       ax-probe set-frame --target <pid> --token <hex> <x> <y> <width> <height>\n       ax-probe raise --target <pid> --token <hex>\n       ax-probe apply --target <pid> --token <hex> --display <x> <y> <w> <h> [--kind <name>]\n       ax-probe batch --target <pid> --token <hex> --plan <path>   # plan lines: \"key x y width height\""
     );
+    eprintln!("       windows <pid> lists runtime keys; use them in a plan or with apply");
 }
 
 /// Print f64 without trailing noise; integers render as integers.
@@ -313,4 +436,14 @@ fn fmt(value: f64) -> String {
     } else {
         format!("{value}")
     }
+}
+
+fn fmt_rect(rect: &Rect) -> String {
+    format!(
+        "ok {{x: {}, y: {}, width: {}, height: {}}}",
+        fmt(rect.x),
+        fmt(rect.y),
+        fmt(rect.width),
+        fmt(rect.height)
+    )
 }

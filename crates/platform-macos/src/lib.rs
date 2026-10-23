@@ -12,9 +12,12 @@ pub mod batch;
 pub mod ffi;
 pub mod fixture;
 
-pub use adapter::{map_ax_error, process_alive, AxError, AxWindow, MacAxAdapter};
+pub use adapter::{
+    map_ax_error, observation_from_windows, process_alive, AxError, AxWindow, MacAxAdapter,
+    MacObservation, MacWindowSet, WindowIdMap, WindowKey,
+};
 pub use batch::{
-    apply_batch, parse_plan, verify_plan_file, BatchOps, BatchResult, BatchTarget, PlanError,
-    WindowKey, WindowOutcome,
+    apply_batch, parse_plan, targets_for_plan, verify_plan_file, BatchOps, BatchResult,
+    BatchTarget, PlanError, WindowOutcome,
 };
 pub use fixture::FixtureError;

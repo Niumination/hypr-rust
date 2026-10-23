@@ -54,6 +54,7 @@ The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md)
 - M1 Rust macOS AX adapter — single self-owned window frame/move/resize/raise + stale handling (native-verified on the owner's host; see `docs/reports/MACOS-M1-AX-ADAPTER-2026-10-18.md`).
 - M2 keyboard-first `ax-keyboard` — explicit select/move/resize/raise on the registered fixture (Jalur A PASS, host-bound: ThinkPad X13 Yoga Gen 1, macOS Tahoe 26.7.1).
 - Native batch — `ax-probe batch` applies a multi-window plan with best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)); native-run on the owner's host (two-window success and two-window rollback, both verified). Permission-denied runtime-tested 2026-10-23 via an AX-untrusted launchd user-domain context (exit 3, §6 caveat: one context only).
+- Per-window identity — `ax-probe windows <pid>` enumerates one process's `AXWindows` and `ax-probe apply ... --display ...` runs the snapshot → planner → native-key mapping → batch slice. Host-run 2026-10-23 on the owner's machine: two self-owned windows in one process enumerated with distinct runtime keys, master-stack plan applied and verified, `UnknownTarget` fails closed, rollback verified (see `docs/PLATFORM-SPIKES.md`).
 
 **Read-only research — not control evidence:**
 

@@ -43,6 +43,11 @@ extern "C" {
     /// Safety: `pid` must be a valid pid_t; returns an owned ref or null.
     pub fn AXUIElementCreateApplication(pid: c_int) -> AXUIElementRef;
 
+    /// Copy the pid of the process that owns an AX element. Returns an AXError
+    /// code (0 = success). Safety: `elem` must be a live AXUIElementRef;
+    /// `pid` receives the owning pid.
+    pub fn AXUIElementGetPid(elem: AXUIElementRef, pid: *mut c_int) -> c_int;
+
     /// Copy an attribute value. On success `*value` holds an owned CFTypeRef
     /// that the caller MUST CFRelease. Returns an AXError code (0 = success).
     /// Safety: `elem` must be a live AXUIElementRef; `attr` a valid CFString.
@@ -118,9 +123,12 @@ extern "C" {
 
     /// Number of elements in a CFArray. Safety: `array` live CFArrayRef.
     pub fn CFArrayGetCount(array: CFTypeRef) -> isize;
-
     /// Element at index (borrowed). Safety: `array` live, `idx` in bounds.
     pub fn CFArrayGetValueAtIndex(array: CFTypeRef, idx: isize) -> CFTypeRef;
+
+    /// Compare two CF objects for equality. Safety: both must be live
+    /// (non-null) CFTypeRefs.
+    pub fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> Boolean;
 }
 
 /// Build a CFString from a static C string literal (the Rust equivalent of
