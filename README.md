@@ -1,6 +1,6 @@
 # Hypr-Rust
 
-**Current state:** documentation + platform-neutral layout-core scaffold + narrow single-window macOS AX control proof (M1 adapter + M2 `ax-keyboard`; host-bound, owner-reported; the read-only 2/3-window enumeration/geometry probe is separate and is not control evidence). Not yet a usable desktop app: batch multi-window application is DEFERRED ([ADR-0004](docs/adr/0004-batch-multiwindow-deferred-no-partial.md)); Windows adapter, tray/menu-bar UI, settings UI, hotkeys and packaging remain to be implemented and tested.
+**Current state:** documentation + platform-neutral layout-core scaffold + narrow single-window macOS AX control proof (M1 adapter + M2 `ax-keyboard`; host-bound, owner-reported; the read-only 2/3-window enumeration/geometry probe is separate and is not control evidence) + a batch multi-window executor with best-effort rollback ([ADR-0005](docs/adr/0005-batch-multiwindow-best-effort-rollback.md); native-run on the owner's host — two-window success and two-window rollback verified, permission-denied runtime-tested in one AX-untrusted context). Not yet a usable desktop app: Windows adapter, tray/menu-bar UI, settings UI, hotkeys and packaging remain to be implemented and tested.
 
 ## Project boundary
 
@@ -27,7 +27,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-This repository snapshot was authored in an environment without `rustc`/`cargo`; these commands have **not** been run here. Do not treat the layout scaffold as compiled or verified until CI or a developer machine records successful results.
+This workspace is compiled and tested on the owner's host (macOS Tahoe 26.7.1, branch `work/phase1-domain`): `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` all pass there. See [`docs/ARENA-VERIFICATION.md`](docs/ARENA-VERIFICATION.md) for the exact runs, dates and commit identities. All claims remain host-bound: no claim is made for Apple-branded Macs, other macOS versions or Windows.
 
 ## AI-agent handoff
 

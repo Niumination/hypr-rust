@@ -23,6 +23,19 @@ For each representative app, test discovery, eligibility, current frame, move, r
 
 **Pass criteria:** ordinary supported windows can be discovered and moved/resized repeatedly without crash, focus theft beyond the requested action, unbounded retry or geometry feedback loop. Unsupported windows are reported and excluded safely.
 
+### Spike 1 addendum — batch multi-window application (macOS, recorded result)
+
+Implemented with best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)), explicitly **not atomic**. Recorded on the owner's ThinkPad X13 Yoga Gen 1, macOS Tahoe 26.7.1 build 25G241, AX granted; batch code and CLI from branch `work/phase1-domain` commit `085f5cb`; runs on 2026-10-22 (single-fixture) and 2026-10-23 (two-window + denied path). Targets are self-owned `HYPR-SPIKE-TARGET` windows only; no titles read.
+
+| Case | Command | Result |
+|---|---|---|
+| CLI gates (no AX call when they fail) | `ax-probe batch` variants | no args → usage, exit 1; no/bad fixture registration → exit 5; plan must include the registered fixture and be a regular non-symlink owner-only (0600) file |
+| Two-window success | `batch --target <A> --token <hex> --plan [A, B]` | both frames applied and verified; `rollback_all_restored=true`, exit 0; per-window `frame` read-backs matched |
+| Two-window rollback | plan `[A→new frame, B→new frame, <live pid with no window>]` | third target failed (`-25204 cannotComplete`) after A and B were applied; batch stopped and restored A and B, both verified by read-back; exit 1 |
+| Permission-denied | read-only `ax-probe frame 1` in an AX-untrusted launchd user-domain job | `error: permission denied (Accessibility not granted)`, exit 3; no AX call made; one context only (see `ARENA-VERIFICATION.md` §6) |
+
+**Exact host/build:** as in Spike 0 record; AX granted to the controlling terminal app. **Evidence & caveats:** `docs/ARENA-VERIFICATION.md` §6 — executed on the owner's host, not independently run by arena.ai; second window B came from a locally compiled test-only unregistered spawner variant (not committed, not part of PR #1).
+
 ## Spike 2 — native workspace contract (conditional feature gate)
 
 Required set—test each operation independently, then as an end-to-end workflow:
