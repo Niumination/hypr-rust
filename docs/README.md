@@ -53,7 +53,7 @@ The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md)
 
 - M1 Rust macOS AX adapter — single self-owned window frame/move/resize/raise + stale handling (native-verified on the owner's host; see `docs/reports/MACOS-M1-AX-ADAPTER-2026-10-18.md`).
 - M2 keyboard-first `ax-keyboard` — explicit select/move/resize/raise on the registered fixture (Jalur A PASS, host-bound: ThinkPad X13 Yoga Gen 1, macOS Tahoe 26.7.1).
-- Native batch — `ax-probe batch` applies a multi-window plan with best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)); native-run on the owner's host (one fixture success + one rollback, both verified).
+- Native batch — `ax-probe batch` applies a multi-window plan with best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)); native-run on the owner's host (two-window success and two-window rollback, both verified). Permission-denied remains NOT RUNTIME TESTED.
 
 **Read-only research — not control evidence:**
 

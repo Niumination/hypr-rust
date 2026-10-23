@@ -46,7 +46,7 @@
 - Validate elevated targets and focus restrictions; no default elevation.
 
 ### Intel macOS Ventura 13+
-**Updated (2026-10-22):** native batch multi-window application is implemented with best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)); current Tahoe evidence is single-window M1/M2 plus a native batch run (one fixture success + one rollback). The Ventura 13+ target remains unverified.
+**Updated (2026-10-22):** native batch multi-window application is implemented with best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)); current Tahoe evidence is single-window M1/M2 plus native batch runs (two-window success and two-window rollback). The Ventura 13+ target remains unverified.
 - Menu-bar lifecycle, settings UI, Accessibility explanation/request and revocation handling.
 - AX discovery/events, public display APIs and coordinate conversion.
 - Validate signed identity/trust, representative apps and permission failures.

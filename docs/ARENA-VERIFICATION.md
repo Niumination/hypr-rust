@@ -48,7 +48,7 @@ Platform-macos is deliberately **outside** workspace members: `cargo build/test 
 | Item | Status | Why |
 |---|---|---|
 | Native AX run (C4/C5/C9/C11/C12/C13/C15/C16) | **executed on owner host**, verbatim in report §5 / M2 §Native | requires the physical Hackintosh + AX grant + self-owned target window |
-| Permission-denied path | **NOT RUNTIME TESTED** | code path exists (`connect()` gate → `PermissionDenied`, exit 3); revoking AX trust would break the test environment |
+| Permission-denied path | **NOT RUNTIME TESTED** | code path exists (`connect()` gate → `PermissionDenied`, exit 3); revoking AX trust would break the test environment, SSH/Remote Login is off (port 22 refused 2026-10-23), and no other AX-untrusted execution context is available |
 | Hackintosh identity (C8) | verified read-only on owner host (kextstat, `hw.model`, EFI `SystemProductName`) | EFI partition not public; evidence table is the public record |
 | Windows 11 behavior | **not verified** | no Windows boot this session; `platform-windows` deferred per `MACOS-TAHOE-NEXT-STAGE.md` |
 | Multi-window writes / batch application | **native-run (best-effort rollback)** | implemented per [ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md); not atomic — a failed batch restores changed windows and reports the actual state |
@@ -121,8 +121,10 @@ These results were produced **on the owner's host by the owner**, not independen
 
 **Gate status:** native batch multi-window application is **implemented with best-effort rollback** — see [ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md); no all-or-nothing guarantee is claimed. Permission-denied is **NOT RUNTIME TESTED**.
 
-**Batch native run (2026-10-22, owner host, same build as Path A):** `ax-probe batch` on the registered self-owned fixture.
-- Success: one target applied and verified (`120,120,420,312`), exit 0; read-back matched.
-- Failure + rollback: plan `[fixture, <live pid with no window>]`; the second target failed (`-25204 cannotComplete`), the batch stopped and restored the fixture to its pre-batch frame, verified; `rollback_all_restored=true`, exit 1.
-- No AX writes were made to any window other than the self-owned fixture; no titles read.
-- This is **owner-run** evidence on one host/build, not independently run by arena.ai.
+**Batch native runs (2026-10-22/23, owner host, same build as Path A):** `ax-probe batch` on self-owned fixture windows — A = the registered fixture; B = a second self-owned window spawned by a locally compiled unregistered spawner variant of the spike harness (test-only helper, not part of PR #1, not committed).
+- CLI gates (no AX call when they fail): no args → usage, exit 1; no/bad fixture registration → exit 5; plan required to include the registered fixture and be owner-only (regular non-symlink, 0600, uid match).
+- Two-window success: plan `[A, B]`, frames `(120,120,420,312)` and `(700,300,480,260)` — both applied, `rollback_all_restored=true`, exit 0; per-window `frame` read-backs matched.
+- Two-window rollback: plan `[A→(40,40,300,200), B→(900,400,200,150), <live pid with no window>]`; the third target failed (`-25204 cannotComplete`) after A and B were applied; the batch stopped and restored A and B to their pre-batch frames, both verified by read-back; `rollback_all_restored=true`, exit 1.
+- Single-fixture run (2026-10-22): one-target success and one failing second target, both with verified restore.
+- No AX writes were made to any window other than the self-owned fixtures; no titles read.
+- This is **executed on the owner's host**, not independently run by arena.ai. Batches are best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)), never atomic.
