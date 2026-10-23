@@ -63,7 +63,7 @@ The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md)
 
 - Automatic multi-window tiling beyond the CLI proof, Windows adapter, tray/menu-bar UI, settings UI, global hotkeys and packaging are all outstanding. Apple Mac and macOS Ventura 13+ are **not** validated by this evidence; no cross-platform parity is claimed.
 
-The macOS spike reports ordinary AX control on a self-owned test window and disables Spaces. The host label conflict (system `MacBookPro16,2` vs owner ThinkPad X13 Yoga) is reconciled in the M1 report §1. PR #1 (Swift spike) and PR #2 (min-size constraints) remain open. See [user device profile](./USER-DEVICE-PROFILE.md), [macOS next stage](./MACOS-TAHOE-NEXT-STAGE.md), and [handoff plan](./AGENT-HANDOFF.md).
+The macOS spike reports ordinary AX control on a self-owned test window and disables Spaces. The host label conflict (system `MacBookPro16,2` vs owner ThinkPad X13 Yoga) is reconciled in the M1 report §1. PR #1 (Swift spike) and PR #2 (min-size constraints) are merged; the Phase 1 domain/planner/batch work landed via PR #5. See [user device profile](./USER-DEVICE-PROFILE.md), [macOS next stage](./MACOS-TAHOE-NEXT-STAGE.md), and [handoff plan](./AGENT-HANDOFF.md).
 
 ## Definition of success for the first usable release
 
