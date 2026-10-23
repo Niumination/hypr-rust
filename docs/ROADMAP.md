@@ -8,7 +8,7 @@
 - **Native batch multi-window application is implemented with best-effort rollback** — the owner changed the semantics (strict no-partial is no longer required); see [ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md), which supersedes [ADR-0004](./adr/0004-batch-multiwindow-deferred-no-partial.md). A failed batch restores every already-changed window and reports the actual state honestly; it never claims atomicity.
 - **Native macOS M2 (Jalur A) PASS is host-bound:** ThinkPad X13 Yoga Gen 1 (Intel i5-10310U), macOS Tahoe 26.7.1 build 25G241, self-owned fixture window. It does **not** validate Apple hardware or older macOS.
 - **Windows 11** waits for a Windows boot; no Windows runtime evidence yet.
-- **No cross-platform parity is claimed.** Permission-denied is NOT RUNTIME TESTED.
+- **No cross-platform parity is claimed.** Permission-denied is runtime-tested in one AX-untrusted launchd user-domain context (2026-10-23).
 
 ## Phase 0 — feasibility and product boundary
 

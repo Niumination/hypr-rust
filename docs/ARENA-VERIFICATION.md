@@ -48,7 +48,7 @@ Platform-macos is deliberately **outside** workspace members: `cargo build/test 
 | Item | Status | Why |
 |---|---|---|
 | Native AX run (C4/C5/C9/C11/C12/C13/C15/C16) | **executed on owner host**, verbatim in report §5 / M2 §Native | requires the physical Hackintosh + AX grant + self-owned target window |
-| Permission-denied path | **NOT RUNTIME TESTED** | code path exists (`connect()` gate → `PermissionDenied`, exit 3); revoking AX trust would break the test environment, SSH/Remote Login is off (port 22 refused 2026-10-23), and no other AX-untrusted execution context is available |
+| Permission-denied path | **RUNTIME TESTED (one AX-untrusted context)** | 2026-10-23 owner host: a launchd user-domain job without an AX grant ran read-only `ax-probe frame 1`; `AXIsProcessTrusted()` → false, `error: permission denied (Accessibility not granted)`, exit 3; no sudo and no TCC change (details + caveats in §6) |
 | Hackintosh identity (C8) | verified read-only on owner host (kextstat, `hw.model`, EFI `SystemProductName`) | EFI partition not public; evidence table is the public record |
 | Windows 11 behavior | **not verified** | no Windows boot this session; `platform-windows` deferred per `MACOS-TAHOE-NEXT-STAGE.md` |
 | Multi-window writes / batch application | **native-run (best-effort rollback)** | implemented per [ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md); not atomic — a failed batch restores changed windows and reports the actual state |
@@ -96,7 +96,7 @@ Note: `MACOSX_DEPLOYMENT_TARGET=26.0` needed only because the owner's rustc (Hom
 ## 5. Honesty constraints honored
 
 - No serials, UUIDs, MLB, credentials, unredacted window titles, or complete EFI configs in the repo (house rule; EFI read was `SystemProductName` only).
-- Permission-denied and Windows gaps marked, not hidden.
+- Permission-denied path runtime-tested in one AX-untrusted launchd user-domain context (2026-10-23, §6); Windows gap marked, not hidden.
 - Spike #1 host label reconciled (was "MacBook Pro 13-inch class" → Hackintosh on ThinkPad X13 Yoga).
 - Arena.ai M1 closeout packet (F1/F1b/F2) + round-4/5 reviews addressed; mapping in report §6. Mock transaction tests labelled as mock; native rollback-denial not runtime-forced. C9 softened (rollback best-effort, not atomic); C14 documents lock TOCTOU as test guard, not absolute PID-reuse proof.
 - Path A (2026-10-21) and the read-only multi-window probe are **owner-reported** (owner host/build), not independently run by arena.ai.
@@ -110,7 +110,7 @@ These results were produced **on the owner's host by the owner**, not independen
 **Path A — M2 native (`ax-keyboard` on the registered self-owned fixture): PASS.**
 - Host: ThinkPad X13 Yoga Gen 1 (Intel i5-10310U), macOS Tahoe 26.7.1 build 25G241, AX granted, OpenCore spoof `SystemProductName=MacBookPro16,2` (a spoof is not device identity).
 - `select`/`move`/`resize`/`raise` PASS (frame persisted); invalid geometry rejected **without changing the fixture** (exit 1); no-token exit 5; stale exit 4.
-- **Permission-denied: NOT RUNTIME TESTED.** Success on normal operations does not prove behavior on failure.
+- **Permission-denied: runtime-tested 2026-10-23** via an AX-untrusted launchd user-domain job — exit 3 with `error: permission denied (Accessibility not granted)`; see the section below. Success on normal operations never proved behavior on failure; this run closes that gap in one context.
 - Rust checks (separate): fmt OK, clippy clean, 17/17 platform-macos, 6/6 workspace.
 
 **Read-only multi-window probe (2 & 3 self-owned fixture windows): PASS, repeatable.**
@@ -119,7 +119,13 @@ These results were produced **on the owner's host by the owner**, not independen
 - Error map: `-25208` = `AXError.notImplemented`; `-25204` = `AXError.cannotComplete`.
 - `AXSize settable=false` came from the **probe fixture**; the M2 `resize` PASS came from a **different fixture** (registered M2 path); no write was attempted on the probe element. Cross-fixture comparison proves nothing about the same element.
 
-**Gate status:** native batch multi-window application is **implemented with best-effort rollback** — see [ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md); no all-or-nothing guarantee is claimed. Permission-denied is **NOT RUNTIME TESTED**.
+**Permission-denied native run (2026-10-23, owner host): PASS.**
+- Context: a one-shot **launchd user-domain** job (`label com.hyprtest.ax-denied-check`, `RunAtLoad`, `/bin/sh` wrapper) ran the read-only `ax-probe frame 1`; the job's responsible process itself holds no Accessibility grant. No sudo, no TCC database change, no system settings or Remote Login change; the job was removed (`launchctl bootout`) immediately after and is not part of any repo.
+- Result: `AXIsProcessTrusted()` returns false → `connect()` gate fires → `error: permission denied (Accessibility not granted)`, **exit 3**; no AX call was made.
+- Caveat: this runtime evidence covers **one** AX-untrusted context (launchd user job). GUI prompt-flow denial and per-app revocation remain untested; do not read it as an exhaustive TCC matrix.
+- Executed on the owner's host, not independently run by arena.ai.
+
+**Gate status:** native batch multi-window application is **implemented with best-effort rollback** — see [ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md); no all-or-nothing guarantee is claimed. Permission-denied is runtime-tested in one AX-untrusted context (2026-10-23).
 
 **Batch native runs (2026-10-22/23, owner host, same build as Path A):** `ax-probe batch` on self-owned fixture windows — A = the registered fixture; B = a second self-owned window spawned by a locally compiled unregistered spawner variant of the spike harness (test-only helper, not part of PR #1, not committed).
 - CLI gates (no AX call when they fail): no args → usage, exit 1; no/bad fixture registration → exit 5; plan required to include the registered fixture and be owner-only (regular non-symlink, 0600, uid match).
