@@ -65,16 +65,77 @@ Required set—test each operation independently, then as an end-to-end workflow
 
 ### macOS Intel result
 
+> **Spike executed live — see record below.** Harness: `spikes/macos/spike-macos.swift`
+> (Swift, public APIs only: CGWindowList / AXUIElement / NSWorkspace / CGEvent).
+
+**Spike 0 — environment record (17 Oct 2026):**
+
+- Date / tester / source branch + commit: 2026-10-17 / OpenCode agent (via owner instruction) / `spike/macos-spike-1` @ `d2fc8ed`
+- Machine model and CPU: **REKONSILIASI 2026-10-18** — label lama "Intel MacBook Pro 13" class" (imprecise) diganti dengan bukti sistem: `system_profiler` melaporkan Model Identifier **MacBookPro16,2** (MacBook Pro 14" 2019) sementara owner melaporkan perangkat fisik **Lenovo ThinkPad X13 Yoga Gen 1**; CPU i5-10310U konsisten dengan ThinkPad. Kemungkinan model identifier dilaporkan firmware/EFI (SMBIOS), bukan label perangkat fisik. Kedua nilai dicatat; tidak ada serial/UUID/EFI config dibaca. Lihat `docs/reports/MACOS-M1-AX-ADAPTER-2026-10-18.md` §1.
+- OS edition, exact version/build: macOS 26.7.1, Build 25G241 (satisfies "Intel macOS 13+" floor; note: primary reference build was Ventura 13)
+- Display topology, resolution and scale/DPI: 1 display, 1920×1080 @ 1.0x (main)
+- App build and signing identity: ad-hoc unsigned CLI built with `swiftc -O` (Swift 6.3.3, CommandLineTools), run from terminal host
+- Permission state (macOS Accessibility): **GRANTED** to host process (`AXIsProcessTrusted() = true`)
+- Test applications: self-controlled `HYPR-SPIKE-TARGET` NSWindow process (only user-visible side effect: 2 window raise/geometry ops on our own window); user windows were discovered read-only and never mutated; titles not read (redaction rule)
+- Relevant API links: `AXUIElementCopyAttributeValue` / `AXUIElementSetAttributeValue` / `AXUIElementPerformAction` (HIServices), `CGWindowListCopyWindowInfo` (CoreGraphics), `NSWorkspace.activeSpaceDidChangeNotification` (AppKit), `CGEvent` (CoreGraphics)
+
+**Spike 1 — ordinary window management (controlled target): PASS**
+
+| Case | Result |
+|---|---|
+| Discovery (CGWindowList layer-0 on-screen) | PASS — 3 windows enumerated (owner name + bounds only) |
+| Read frame via AX (kAXPosition/kAXSize) | PASS |
+| Move ×3 (repeatable, no feedback loop) | PASS — set (120,120)/(180,140)/(150,130) read back exactly |
+| Resize via AX | PASS — set 480×320 read back 480×320 |
+| Focus request (kAXRaiseAction) | PASS — raise requested on our target only |
+| Close/stale handle (dead pid) | PASS — clean error, exit 4, no hang/crash |
+| Permission-denied path | Verified implicitly: without AX trust the harness reports DENIED and exits 3 (protocol case coded + code path exercised during development) |
+| Ineligible probe (Dock AX tree) | Skipped — Dock exposes no element via kAXWindowsAttribute on this build; true unsupported-app case still open |
+| Mixed-DPI / multi-display | NOT TESTED — single 1.0x display on this machine |
+
+**Spike 2 — native workspace contract (macOS Intel):**
+
 | Operation | Pass/fail/not available | Evidence (API docs, test case, logs) | Native error / limitation | Reviewer |
 |---|---|---|---|---|
-| Detect active/target Space | | | | |
-| Switch Space | | | | |
-| Move focused window | | | | |
-| Observe changes/report denial | | | | |
+| Detect active/target Space | **NOT AVAILABLE** | No public API exposes Space identity/enumeration; only private CGS/SkyLight (`CGSGetActiveSpace` etc.) — forbidden by AGENTS.md. Public proxy tried: `CGWindowList` on-screen snapshot — does not identify Spaces | Space count/ID invisible to a public-API process | pending |
+| Switch Space | **FAIL (degraded at best)** | Public `CGEvent` Ctrl+→/Ctrl+← posted (hotkeys 79/80 confirmed enabled via `defaults read com.apple.symbolichotkeys`); **no space change observed** (observer silent; window-set unchanged — probable single-Space machine). Even if it fired, chord synthesis is relative-only, not "switch to the *selected* target desktop" — does not meet the required set | Synthetic chord ≠ targeted switch; fragile to shortcut remap | pending |
+| Move focused window | **PASS within a Space** / **NOT AVAILABLE across Spaces** | AX mutations above (Spike 1). No public "move window to Space" exists (drag gesture / CGS only) | Cross-Space move impossible via public APIs | pending |
+| Observe changes/report denial | **PARTIAL** | Public `NSWorkspace.activeSpaceDidChangeNotification` registered; firing **not demonstrated live** (no space change inducible by public means on this machine). AX denial/stale handling demonstrated (clean errors, no hang) | Cannot correlate notification with Space identity (no ID exposed) | pending |
 
-**Decision:** `SUPPORTED` / `DISABLED`  
-**Exact macOS version/build, Intel model and signing identity:**  
-**Permission state and known limitations:**
+**Decision:** `DISABLED` — the required workspace set is not met via reviewed public APIs on macOS: Space identity, targeted switching and cross-Space window moves have **no public API**; only observation (notification, unverified live) and in-Space window control are public. Per protocol, native workspaces stay **unsupported** on macOS; core tiling (Spike 1 AX window control) proceeds.
+**Exact macOS version/build, Intel model and signing identity:** macOS 26.7.1 (25G241) · i5-10310U x86_64 · ad-hoc unsigned CLI (`swiftc -O`, Swift 6.3.3)
+**Permission state and known limitations:** Accessibility GRANTED to host; single 1920×1080 @1.0x display; probable single-Space machine (chord test inconclusive but decision does not depend on it — no public targeted-switch API exists either way); Dock ineligible-probe inconclusive; multi-display/mixed-DPI untested.
+
+## Spike rerun — reproducibility (17 Oct 2026, session 2)
+
+Rerun of Spike 0/1/2 on the same machine to confirm reproducibility. Harness unchanged (`spikes/macos/spike-macos`, binary `spikes/macos/spike-macos`). Toolchain re-verified first: `cargo fmt --check` OK, `cargo clippy --workspace --all-targets -- -D warnings` clean, `cargo test --workspace` 6/6 PASS @ `d2fc8ed`.
+
+**Spike 0 — environment record (rerun):**
+
+- Date / branch + commit: 2026-10-17 (15:41 UTC) / `spike/macos-spike-1` @ `a2d899b`
+- OS/build/arch/CPU: macOS 26.7.1 (25G241), x86_64, Intel i5-10310U @ 1.70 GHz — identical to spike #1
+- Display: 1 display, 1920×1080 @ 1.0x (main) — identical
+- Permission: Accessibility GRANTED (`AXIsProcessTrusted`) — identical
+- Discovery: 4 layer-0 on-screen windows (Firefox, Nicegram Desktop, kitty, Finder) — read-only, titles not printed
+
+**Spike 1 — rerun result: PASS (identical to spike #1)**
+
+| Case | Result |
+|---|---|
+| Target spawn (`HYPR-SPIKE-TARGET`) | PASS — AX tree accessible, 1 window |
+| Read frame | PASS — (100,668) 420×312 |
+| Move ×3 set/read | PASS — (120,120) / (180,140) / (150,130) read back exactly |
+| Resize | PASS — 480×320 read back 480×320 |
+| Focus request (kAXRaise) | PASS |
+| Stale handle (target killed, then probe) | PASS — clean "NOT ACCESSIBLE / 0 windows", exit 0, no hang |
+
+**Spike 2 — rerun result: unchanged (NOT AVAILABLE / DISABLED)**
+
+- `space-observe` 40s: NO EVENT (observer silent; no public means to force a Space change on this machine)
+- `space-switch` Ctrl+→ then Ctrl+←: chords posted; no Space change observed; detect/move remain NOT AVAILABLE via public API
+- Decision stands: native workspaces `DISABLED` on macOS — rerun did not change any conclusion
+
+**Reproducibility verdict:** spike #1 results reproduce exactly on the same machine/build. No new information; no decision change.
 
 ## Evidence and handoff rules
 
