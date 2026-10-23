@@ -1,7 +1,7 @@
 # Hypr-Rust — Engineering Documentation
 
-**Status:** Interview baseline / pre-implementation; feasibility validation pending  
-**Document date:** 2026-10-17  
+**Status:** Interview baseline / pre-implementation; native macOS M1/M2 single-window proof (host-bound); native batch multi-window implemented with best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md))  
+**Document date:** 2026-10-17 (updated 2026-10-22)  
 **Working name:** Hypr-Rust (placeholder; do not imply affiliation with Hyprland)
 
 ## Executive summary
@@ -15,7 +15,7 @@ Build a Rust application that reproduces the *tiling workflow and user-facing co
 - **Workspace:** native Windows Virtual Desktop/macOS Spaces only, optional per platform and gated by proof using public APIs. Never emulate with minimize/hide. If unsupported, disable the workspace feature on that platform and explain why.
 - **Explicitly out of scope for MVP:** replacement display server/compositor; Wayland protocol hosting on Windows/macOS; universal interception of every app; pixel-identical Hyprland rendering/effects; Linux support unless separately approved.
 
-The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md); shared core/platform adapters in [ADR-0002](./adr/0002-core-and-platform-adapters.md); and the native-workspace no-emulation policy in [ADR-0003](./adr/0003-native-workspaces.md). The PRD records interview decisions; the other documents define architecture, REA-assisted research, validation and staged delivery.
+The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md); shared core/platform adapters in [ADR-0002](./adr/0002-core-and-platform-adapters.md); the native-workspace no-emulation policy in [ADR-0003](./adr/0003-native-workspaces.md); and the batch multi-window best-effort rollback decision in [ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md). The PRD records interview decisions; the other documents define architecture, REA-assisted research, validation and staged delivery.
 
 ## Document map
 
@@ -33,6 +33,8 @@ The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md)
 12. [ADR-0002: shared core + OS adapters](./adr/0002-core-and-platform-adapters.md)
 13. [ADR-0003: native workspace capability gate; no hide/minimize emulation](./adr/0003-native-workspaces.md)
 14. [Agent workflow inspired by Karpathy's engineering heuristics](./AGENT-WORKFLOW.md)
+15. [ADR-0004: batch multi-window deferred under strict no-partial requirement](./adr/0004-batch-multiwindow-deferred-no-partial.md) (superseded)
+16. [ADR-0005: batch multi-window accepted with best-effort rollback](./adr/0005-batch-multiwindow-best-effort-rollback.md)
 
 ## Non-goals and important caveats
 
@@ -43,7 +45,25 @@ The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md)
 
 ## Current implementation state
 
-The upstream `main` branch contains the platform-neutral layout-core scaffold. Its latest main commit reports `fmt`, `clippy` and 6 tests passing on the user's macOS host. Two open PRs add a macOS Swift spike report/harness and min-size constraints (the latter reports 13 tests); neither was merged at last review. The macOS spike reports ordinary AX control on a self-owned test window and disables Spaces. It also contains a Dock-position mutation that must be removed before rerunning/merging. The host label in that report must be reconciled with the user's ThinkPad clarification. This remains **not a usable desktop app**: a Rust macOS adapter, Windows adapter, tray/menu-bar UI, settings UI, global hotkeys and packaging are outstanding. See [user device profile](./USER-DEVICE-PROFILE.md), [macOS next stage](./MACOS-TAHOE-NEXT-STAGE.md), and [handoff plan](./AGENT-HANDOFF.md).
+**Pure layout planner — no OS control (owner-reported):**
+
+- Platform-neutral `layout-core` scaffold; fmt/clippy clean and 6 tests passing (owner-reported).
+
+**Native control proof — single fixture window only (host-bound, owner-reported):**
+
+- M1 Rust macOS AX adapter — single self-owned window frame/move/resize/raise + stale handling (native-verified on the owner's host; see `docs/reports/MACOS-M1-AX-ADAPTER-2026-10-18.md`).
+- M2 keyboard-first `ax-keyboard` — explicit select/move/resize/raise on the registered fixture (Jalur A PASS, host-bound: ThinkPad X13 Yoga Gen 1, macOS Tahoe 26.7.1).
+- Native batch — `ax-probe batch` applies a multi-window plan with best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)); native-run on the owner's host (two-window success and two-window rollback, both verified). Permission-denied runtime-tested 2026-10-23 via an AX-untrusted launchd user-domain context (exit 3, §6 caveat: one context only).
+
+**Read-only research — not control evidence:**
+
+- Multi-window probe — AX enumeration + geometry reads for 2/3 fixture windows, **no AX writes**; it is **not** evidence of multi-window control or batch atomicity (owner-reported).
+
+**Does not exist — no production desktop app:**
+
+- Automatic multi-window tiling beyond the CLI proof, Windows adapter, tray/menu-bar UI, settings UI, global hotkeys and packaging are all outstanding. Apple Mac and macOS Ventura 13+ are **not** validated by this evidence; no cross-platform parity is claimed.
+
+The macOS spike reports ordinary AX control on a self-owned test window and disables Spaces. The host label conflict (system `MacBookPro16,2` vs owner ThinkPad X13 Yoga) is reconciled in the M1 report §1. PR #1 (Swift spike) and PR #2 (min-size constraints) remain open. See [user device profile](./USER-DEVICE-PROFILE.md), [macOS next stage](./MACOS-TAHOE-NEXT-STAGE.md), and [handoff plan](./AGENT-HANDOFF.md).
 
 ## Definition of success for the first usable release
 
