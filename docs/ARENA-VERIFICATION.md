@@ -3,7 +3,7 @@
 **Purpose:** let an external verifier (arena.ai) check every public claim in this repo without access to the owner's host. Everything below is either (a) reproducible from the public repo alone, or (b) explicitly marked as host-bound evidence with the reason.
 
 **Repo:** https://github.com/Niumination/hypr-rust (public) · local: `labs/hypr-rust/`  
-**Date:** 2026-10-19 (updated after arena.ai round-5 review — C9 softened, C14 lock TOCTOU, honest limits). **Updated 2026-10-22** — added owner-reported Path A + read-only multi-window probe (§6), host-bound table, and [ADR-0004](./adr/0004-batch-multiwindow-deferred-no-partial.md) deferral; tests are owner-reported, not independently run by arena.ai.
+**Date:** 2026-10-19 (updated after arena.ai round-5 review — C9 softened, C14 lock TOCTOU, honest limits). **Updated 2026-10-22** — added owner-reported Path A + read-only multi-window probe (§6), host-bound table, and [ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md) (batch accepted with best-effort rollback, superseding [ADR-0004](./adr/0004-batch-multiwindow-deferred-no-partial.md)); tests are owner-reported, not independently run by arena.ai.
 
 ---
 
@@ -51,8 +51,8 @@ Platform-macos is deliberately **outside** workspace members: `cargo build/test 
 | Permission-denied path | **NOT RUNTIME TESTED** | code path exists (`connect()` gate → `PermissionDenied`, exit 3); revoking AX trust would break the test environment |
 | Hackintosh identity (C8) | verified read-only on owner host (kextstat, `hw.model`, EFI `SystemProductName`) | EFI partition not public; evidence table is the public record |
 | Windows 11 behavior | **not verified** | no Windows boot this session; `platform-windows` deferred per `MACOS-TAHOE-NEXT-STAGE.md` |
-| Multi-window writes / batch application | **NOT TESTED / DEFERRED** | deferred by [ADR-0004](./adr/0004-batch-multiwindow-deferred-no-partial.md); no public all-or-nothing mechanism reviewed |
-| No-partial batch guarantee | **NOT TESTED / DEFERRED** | best-effort rollback (C9) is not accepted as meeting the strict requirement |
+| Multi-window writes / batch application | **native-run (best-effort rollback)** | implemented per [ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md); not atomic — a failed batch restores changed windows and reports the actual state |
+| No-partial batch guarantee | **NOT MET by design** | owner accepted best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)); a failed batch may leave a partial state and says so |
 | Read-only multi-window probe (2/3 fixture windows) | executed on owner host; owner-reported | same host/build as Path A; no AX writes; proves nothing about batch atomicity |
 
 ## 4. Reproduction quick start (public repo, any macOS 26 toolchain)
@@ -100,7 +100,7 @@ Note: `MACOSX_DEPLOYMENT_TARGET=26.0` needed only because the owner's rustc (Hom
 - Spike #1 host label reconciled (was "MacBook Pro 13-inch class" → Hackintosh on ThinkPad X13 Yoga).
 - Arena.ai M1 closeout packet (F1/F1b/F2) + round-4/5 reviews addressed; mapping in report §6. Mock transaction tests labelled as mock; native rollback-denial not runtime-forced. C9 softened (rollback best-effort, not atomic); C14 documents lock TOCTOU as test guard, not absolute PID-reuse proof.
 - Path A (2026-10-21) and the read-only multi-window probe are **owner-reported** (owner host/build), not independently run by arena.ai.
-- Native batch multi-window is **DEFERRED** under the strict no-partial requirement ([ADR-0004](./adr/0004-batch-multiwindow-deferred-no-partial.md)); best-effort rollback is not presented as atomic, and M1/M2 are not claimed to meet the guarantee.
+- Native batch multi-window is implemented with best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)); it is not atomic and no all-or-nothing guarantee is claimed.
 - Error map corrected: `-25208` = `notImplemented`; `-25204` = `cannotComplete`. `settable` is a per-element capability signal, not proof of runtime success, and not comparable across fixtures.
 
 ## 6. Owner-reported native evidence (2026-10-21) — Path A + read-only probe
@@ -119,4 +119,10 @@ These results were produced **on the owner's host by the owner**, not independen
 - Error map: `-25208` = `AXError.notImplemented`; `-25204` = `AXError.cannotComplete`.
 - `AXSize settable=false` came from the **probe fixture**; the M2 `resize` PASS came from a **different fixture** (registered M2 path); no write was attempted on the probe element. Cross-fixture comparison proves nothing about the same element.
 
-**Gate status:** native batch multi-window application is **DEFERRED / BLOCKED** by the strict no-partial requirement — see [ADR-0004](./adr/0004-batch-multiwindow-deferred-no-partial.md). Permission-denied, multi-window writes, and no-partial batch are **NOT TESTED / DEFERRED**.
+**Gate status:** native batch multi-window application is **implemented with best-effort rollback** — see [ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md); no all-or-nothing guarantee is claimed. Permission-denied is **NOT RUNTIME TESTED**.
+
+**Batch native run (2026-10-22, owner host, same build as Path A):** `ax-probe batch` on the registered self-owned fixture.
+- Success: one target applied and verified (`120,120,420,312`), exit 0; read-back matched.
+- Failure + rollback: plan `[fixture, <live pid with no window>]`; the second target failed (`-25204 cannotComplete`), the batch stopped and restored the fixture to its pre-batch frame, verified; `rollback_all_restored=true`, exit 1.
+- No AX writes were made to any window other than the self-owned fixture; no titles read.
+- This is **owner-run** evidence on one host/build, not independently run by arena.ai.
