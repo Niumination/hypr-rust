@@ -36,6 +36,19 @@ Implemented with best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-b
 
 **Exact host/build:** as in Spike 0 record; AX granted to the controlling terminal app. **Evidence & caveats:** `docs/ARENA-VERIFICATION.md` §6 — executed on the owner's host, not independently run by arena.ai; second window B came from the committed `spawn-target --no-register` mode of the spike harness (auxiliary target only; spike harness merged into `main` via PR #1 — evidence run used spike head `7636eab`); batch code and CLI built from `work/phase1-domain` `085f5cb` (merged via PR #5).
 
+### Spike 1 addendum — per-window runtime identity and planner wiring (macOS, recorded result)
+
+The batch above addressed targets by pid, which cannot name more than one window of a process. This addendum closes that gap (host run recorded 2026-10-23 on the owner's machine):
+
+- `MacAxAdapter::windows(pid)` enumerates `AXWindows` for one pid, checks each element's owning pid (`AXUIElementGetPid`), reads its frame, and records the focused window (`kAXFocusedWindowAttribute` + `CFEqual`). The result is a `MacWindowSet` that owns the element handles and assigns one opaque runtime `WindowKey` per window. `BatchOps` is implemented for `MacWindowSet` (never for a pid), so a key is never re-resolved against a window list that changed after enumeration.
+- `MacWindowSet::observe(display)` returns a `PlatformSnapshot` plus a `WindowIdMap` (planner `WindowId` → native `WindowKey`). `batch::targets_for_plan` maps a `LayoutPlan` through that map and fails closed on an unmapped ID, so the domain never sees a native key.
+- CLI: `ax-probe windows <pid>` (read-only key listing), `ax-probe apply --target <pid> --token <hex> --display <x y w h> [--kind <name>]` (snapshot → planner → mapping → batch), and `ax-probe batch --plan` whose lines are now `key x y width height` (the rows above predate the format change). Every plan key must exist in the fixture's enumerated window set.
+- Limits: `display` is supplied by the caller (no monitor query; `bounds == work_area`, scale `1.0`); capability bits are optimistic because the M3 review established that `AXUIElementIsAttributeSettable` is not a reliable eligibility gate — the verified write plus rollback is the real gate; subrole (dialog) classification is not implemented.
+
+**Host run (2026-10-23, owner host ThinkPad X13 Yoga Gen 1, Tahoe 26.7.1, AX granted to the controlling terminal):** the fixture `spawn-target --count 2` (built from `spikes/macos/spike-macos.swift`) opened two self-owned `HYPR-SPIKE-TARGET` windows in **one** process. `ax-probe windows <pid>` listed both with distinct runtime keys; `ax-probe apply --display 0 24 1920 1056` computed a master-stack plan (master = the focused window), applied both targets, `rollback_all_restored=true`, exit 0, verified by read-back; a second run was idempotent. `ax-probe batch --plan` applied the same frames; a plan naming an unobserved key failed closed (`UnknownTarget`) with no writes.
+
+**Coordinate convention (recorded):** AX frames use a **top-left origin**, so the `--display` work area must exclude the menu bar. Passing `0 0 1920 1080` placed a window under the menu bar; macOS clamped it and the read-back mismatched (y 12→30), so the batch rolled back and reported `rollback_all_restored=true` with the restored frame — the rollback path working as documented. The adapter does not query the work area yet; the caller supplies it.
+
 ## Spike 2 — native workspace contract (conditional feature gate)
 
 Required set—test each operation independently, then as an end-to-end workflow:
