@@ -3,7 +3,7 @@
 **Purpose:** let an external verifier (arena.ai) check every public claim in this repo without access to the owner's host. Everything below is either (a) reproducible from the public repo alone, or (b) explicitly marked as host-bound evidence with the reason.
 
 **Repo:** https://github.com/Niumination/hypr-rust (public) · local: `labs/hypr-rust/`  
-**Date:** 2026-10-19 (updated after arena.ai round-5 review — C9 softened, C14 lock TOCTOU, honest limits). **Updated 2026-10-22** — added owner-reported Path A + read-only multi-window probe (§6), host-bound table, and [ADR-0004](./adr/0004-batch-multiwindow-deferred-no-partial.md) deferral; tests are owner-reported, not independently run by arena.ai.
+**Date:** 2026-10-19 (updated after arena.ai round-5 review — C9 softened, C14 lock TOCTOU, honest limits). **Updated 2026-10-22** — added owner-reported Path A + read-only multi-window probe (§6), host-bound table, and [ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md) (batch accepted with best-effort rollback, superseding [ADR-0004](./adr/0004-batch-multiwindow-deferred-no-partial.md)); tests are owner-reported, not independently run by arena.ai.
 
 ---
 
@@ -16,9 +16,9 @@ sit above it.
 |---|---|---|---|
 | `main` | `efaaba4` | — | Code bundle: M1 AX adapter + M2 keyboard-first merged. Later docs-only commits add the Hackintosh host profile, this brief, and ADR-0004 — the row points to the code commit; docs tips are not pinned |
 | `spike/macos-spike-1` | `0eb9a25` | [#1](https://github.com/Niumination/hypr-rust/pull/1) | Swift AX spike (Dock mutation removed), Spaces DISABLED, host-label reconciliation, lifecycle-bounded fixture registration (token + flock, no unused helpers, token not printed) |
-| `core/tiling-constraints` | `51cfced` | [#2](https://github.com/Niumination/hypr-rust/pull/2) | Min-size constraints + overflow policy (13 tests) |
+| `core/tiling-constraints` | `d814d2c` | [#2](https://github.com/Niumination/hypr-rust/pull/2) | Min-size constraints + overflow policy (13 tests) |
 | `macos/tahoe-ax-adapter-m1` | `e78d104` | [#3](https://github.com/Niumination/hypr-rust/pull/3) | M1 Rust AX adapter (rollback on all post-mutation failures + flock-gated registration, EWOULDBLOCK-only lock check); merged to main |
-| `macos/m2-keyboard-plan` | `1b022a7` | [#4](https://github.com/Niumination/hypr-rust/pull/4) | M2 keyboard-first plan + `ax-keyboard` implementation (select/move/resize/raise); all-variants error formatter + dispatch; merged to main |
+| `macos/m2-keyboard-plan` | `27191d7` | [#4](https://github.com/Niumination/hypr-rust/pull/4) | M2 keyboard-first plan + `ax-keyboard` implementation (select/move/resize/raise); all-variants error formatter + dispatch; merged to main |
 
 Platform-macos is deliberately **outside** workspace members: `cargo build/test --workspace` stays Windows-safe; the macOS crate is built via its own manifest (see §4).
 
@@ -48,11 +48,11 @@ Platform-macos is deliberately **outside** workspace members: `cargo build/test 
 | Item | Status | Why |
 |---|---|---|
 | Native AX run (C4/C5/C9/C11/C12/C13/C15/C16) | **executed on owner host**, verbatim in report §5 / M2 §Native | requires the physical Hackintosh + AX grant + self-owned target window |
-| Permission-denied path | **NOT RUNTIME TESTED** | code path exists (`connect()` gate → `PermissionDenied`, exit 3); revoking AX trust would break the test environment |
+| Permission-denied path | **RUNTIME TESTED (one AX-untrusted context)** | 2026-10-23 owner host: a launchd user-domain job without an AX grant ran read-only `ax-probe frame 1`; `AXIsProcessTrusted()` → false, `error: permission denied (Accessibility not granted)`, exit 3; no sudo and no TCC change (details + caveats in §6) |
 | Hackintosh identity (C8) | verified read-only on owner host (kextstat, `hw.model`, EFI `SystemProductName`) | EFI partition not public; evidence table is the public record |
 | Windows 11 behavior | **not verified** | no Windows boot this session; `platform-windows` deferred per `MACOS-TAHOE-NEXT-STAGE.md` |
-| Multi-window writes / batch application | **NOT TESTED / DEFERRED** | deferred by [ADR-0004](./adr/0004-batch-multiwindow-deferred-no-partial.md); no public all-or-nothing mechanism reviewed |
-| No-partial batch guarantee | **NOT TESTED / DEFERRED** | best-effort rollback (C9) is not accepted as meeting the strict requirement |
+| Multi-window writes / batch application | **native-run (best-effort rollback)** | implemented per [ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md); not atomic — a failed batch restores changed windows and reports the actual state |
+| No-partial batch guarantee | **NOT MET by design** | owner accepted best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)); a failed batch may leave a partial state and says so |
 | Read-only multi-window probe (2/3 fixture windows) | executed on owner host; owner-reported | same host/build as Path A; no AX writes; proves nothing about batch atomicity |
 
 ## 4. Reproduction quick start (public repo, any macOS 26 toolchain)
@@ -96,11 +96,11 @@ Note: `MACOSX_DEPLOYMENT_TARGET=26.0` needed only because the owner's rustc (Hom
 ## 5. Honesty constraints honored
 
 - No serials, UUIDs, MLB, credentials, unredacted window titles, or complete EFI configs in the repo (house rule; EFI read was `SystemProductName` only).
-- Permission-denied and Windows gaps marked, not hidden.
+- Permission-denied path runtime-tested in one AX-untrusted launchd user-domain context (2026-10-23, §6); Windows gap marked, not hidden.
 - Spike #1 host label reconciled (was "MacBook Pro 13-inch class" → Hackintosh on ThinkPad X13 Yoga).
 - Arena.ai M1 closeout packet (F1/F1b/F2) + round-4/5 reviews addressed; mapping in report §6. Mock transaction tests labelled as mock; native rollback-denial not runtime-forced. C9 softened (rollback best-effort, not atomic); C14 documents lock TOCTOU as test guard, not absolute PID-reuse proof.
 - Path A (2026-10-21) and the read-only multi-window probe are **owner-reported** (owner host/build), not independently run by arena.ai.
-- Native batch multi-window is **DEFERRED** under the strict no-partial requirement ([ADR-0004](./adr/0004-batch-multiwindow-deferred-no-partial.md)); best-effort rollback is not presented as atomic, and M1/M2 are not claimed to meet the guarantee.
+- Native batch multi-window is implemented with best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)); it is not atomic and no all-or-nothing guarantee is claimed.
 - Error map corrected: `-25208` = `notImplemented`; `-25204` = `cannotComplete`. `settable` is a per-element capability signal, not proof of runtime success, and not comparable across fixtures.
 
 ## 6. Owner-reported native evidence (2026-10-21) — Path A + read-only probe
@@ -110,7 +110,7 @@ These results were produced **on the owner's host by the owner**, not independen
 **Path A — M2 native (`ax-keyboard` on the registered self-owned fixture): PASS.**
 - Host: ThinkPad X13 Yoga Gen 1 (Intel i5-10310U), macOS Tahoe 26.7.1 build 25G241, AX granted, OpenCore spoof `SystemProductName=MacBookPro16,2` (a spoof is not device identity).
 - `select`/`move`/`resize`/`raise` PASS (frame persisted); invalid geometry rejected **without changing the fixture** (exit 1); no-token exit 5; stale exit 4.
-- **Permission-denied: NOT RUNTIME TESTED.** Success on normal operations does not prove behavior on failure.
+- **Permission-denied: runtime-tested 2026-10-23** via an AX-untrusted launchd user-domain job — exit 3 with `error: permission denied (Accessibility not granted)`; see the section below. Success on normal operations never proved behavior on failure; this run closes that gap in one context.
 - Rust checks (separate): fmt OK, clippy clean, 17/17 platform-macos, 6/6 workspace.
 
 **Read-only multi-window probe (2 & 3 self-owned fixture windows): PASS, repeatable.**
@@ -119,4 +119,18 @@ These results were produced **on the owner's host by the owner**, not independen
 - Error map: `-25208` = `AXError.notImplemented`; `-25204` = `AXError.cannotComplete`.
 - `AXSize settable=false` came from the **probe fixture**; the M2 `resize` PASS came from a **different fixture** (registered M2 path); no write was attempted on the probe element. Cross-fixture comparison proves nothing about the same element.
 
-**Gate status:** native batch multi-window application is **DEFERRED / BLOCKED** by the strict no-partial requirement — see [ADR-0004](./adr/0004-batch-multiwindow-deferred-no-partial.md). Permission-denied, multi-window writes, and no-partial batch are **NOT TESTED / DEFERRED**.
+**Permission-denied native run (2026-10-23, owner host): PASS.**
+- Context: a one-shot **launchd user-domain** job (`label com.hyprtest.ax-denied-check`, `RunAtLoad`, `/bin/sh` wrapper) ran the read-only `ax-probe frame 1`; the job's responsible process itself holds no Accessibility grant. No sudo, no TCC database change, no system settings or Remote Login change; the job was removed (`launchctl bootout`) immediately after and is not part of any repo.
+- Result: `AXIsProcessTrusted()` returns false → `connect()` gate fires → `error: permission denied (Accessibility not granted)`, **exit 3**; no AX call was made.
+- Caveat: this runtime evidence covers **one** AX-untrusted context (launchd user job). GUI prompt-flow denial and per-app revocation remain untested; do not read it as an exhaustive TCC matrix.
+- Executed on the owner's host, not independently run by arena.ai.
+
+**Gate status:** native batch multi-window application is **implemented with best-effort rollback** — see [ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md); no all-or-nothing guarantee is claimed. Permission-denied is runtime-tested in one AX-untrusted context (2026-10-23).
+
+**Batch native runs (2026-10-22/23, owner host, same build as Path A):** `ax-probe batch` on self-owned fixture windows — A = the registered fixture; B = a second self-owned window started by the committed `spawn-target --no-register` mode of the spike harness (auxiliary target only — no fixture lock/registration; spike branch head `7636eab`, PR #1). Both runs below were reproduced on 2026-10-23 with the committed harness build and produced identical results.
+- CLI gates (no AX call when they fail): no args → usage, exit 1; no/bad fixture registration → exit 5; plan required to include the registered fixture and be owner-only (regular non-symlink, 0600, uid match).
+- Two-window success: plan `[A, B]`, frames `(120,120,420,312)` and `(700,300,480,260)` — both applied, `rollback_all_restored=true`, exit 0; per-window `frame` read-backs matched.
+- Two-window rollback: plan `[A→(40,40,300,200), B→(900,400,200,150), <live pid with no window>]`; the third target failed (`-25204 cannotComplete`) after A and B were applied; the batch stopped and restored A and B to their pre-batch frames, both verified by read-back; `rollback_all_restored=true`, exit 1.
+- Single-fixture run (2026-10-22): one-target success and one failing second target, both with verified restore.
+- No AX writes were made to any window other than the self-owned fixtures; no titles read.
+- This is **executed on the owner's host**, not independently run by arena.ai. Batches are best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)), never atomic.

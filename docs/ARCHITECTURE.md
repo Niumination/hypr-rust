@@ -101,7 +101,8 @@ Required invariants:
 - No overlaps for non-floating windows except layout modes that intentionally stack/monocle.
 - Stable ordering and deterministic rounding.
 - For BSP, split nodes maintain ratio bounds and prune/rebalance after removals.
-- If minimum sizes cannot fit, engine applies documented overflow policy (e.g. clamp + report, or switch affected window to float); never silently produce negative dimensions.
+- If a window minimum exceeds its cell, the engine clamps the rectangle up to the minimum and shifts it left/up to stay inside the work area; it never hides or minimizes a window. If the minimum itself exceeds the work area, the rectangle is capped to the available area. Both cases emit a diagnostic; the engine never silently produces negative dimensions and never auto-floats a window. Resolving the resulting overlap (e.g. by floating the window) is the executor's job, driven by the reported diagnostics.
+- Per-window minimums must be finite and non-negative; otherwise the planner returns `LayoutError::InvalidConstraints` before planning.
 - Coordinate transform (logical points/pixels, scale, origin direction) occurs only at adapter edge.
 
 ## 7. Platform adapter responsibilities

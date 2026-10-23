@@ -8,8 +8,13 @@
 //! (documented wrappers); no other module contains unsafe blocks.
 
 pub mod adapter;
+pub mod batch;
 pub mod ffi;
 pub mod fixture;
 
 pub use adapter::{map_ax_error, process_alive, AxError, AxWindow, MacAxAdapter};
+pub use batch::{
+    apply_batch, parse_plan, verify_plan_file, BatchOps, BatchResult, BatchTarget, PlanError,
+    WindowKey, WindowOutcome,
+};
 pub use fixture::FixtureError;

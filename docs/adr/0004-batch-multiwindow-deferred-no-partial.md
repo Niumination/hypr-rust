@@ -1,6 +1,6 @@
 # ADR-0004: Batch Multi-Window Application Deferred Under Strict No-Partial Requirement
 
-- **Status:** Accepted (owner decision: retain the strict all-or-nothing requirement)
+- **Status:** Superseded by [ADR-0005](./0005-batch-multiwindow-best-effort-rollback.md) (2026-10-22 — owner decision changed the semantics to best-effort rollback)
 - **Date:** 2026-10-22
 - **Decision owners:** Product + owner
 

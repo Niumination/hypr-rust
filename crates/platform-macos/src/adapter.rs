@@ -242,10 +242,10 @@ fn is_missing_main_window(code: i32) -> bool {
 
 /// AX reports integer-ish points; allow a small tolerance when verifying
 /// read-back geometry against a requested frame.
-const K_FRAME_TOLERANCE: f64 = 1.0;
+pub(crate) const K_FRAME_TOLERANCE: f64 = 1.0;
 
 /// Frame comparison with tolerance.
-fn frames_match(expected: Rect, actual: Rect, tolerance: f64) -> bool {
+pub(crate) fn frames_match(expected: Rect, actual: Rect, tolerance: f64) -> bool {
     (actual.x - expected.x).abs() <= tolerance
         && (actual.y - expected.y).abs() <= tolerance
         && (actual.width - expected.width).abs() <= tolerance

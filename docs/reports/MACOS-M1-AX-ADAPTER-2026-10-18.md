@@ -154,7 +154,7 @@ oldtoken-exit=4
 | Baseline fmt/clippy/test + toolchain version | ✅ | §2, §4 |
 | Self-owned window discovered/read/moved/resized repeatedly, read-back within tolerance | ✅ | §5 (move×3 + resize, read-back eksak ≤1pt, token-gated) |
 | Probe mutasi hanya target self-owned terdaftar (token + flock) | ✅ | §5: `set-frame`/`raise` wajib token; verifikasi file (regular non-symlink, 0600, uid match) + flock lock + pid hidup → gagal exit 5/4 sebelum AX; hanya fixture self-owned; tidak ada enumerasi window user; tidak ada judul di log |
-| AX denied path exercised atau ditandai "not runtime tested" | ⚠️ **NOT RUNTIME TESTED** | Code path ada: `connect()` gate `AXIsProcessTrusted()` → `PermissionDenied` (exit 3). Host memegang AX trust; revoke butuh TCC reset + System Settings (merusak environment test). Ditandai jujur. |
+| AX denied path exercised atau ditandai "not runtime tested" | ⚠️ **NOT RUNTIME TESTED** | Code path ada: `connect()` gate `AXIsProcessTrusted()` → `PermissionDenied` (exit 3). Host memegang AX trust; revoke butuh TCC reset + System Settings (merusak environment test). Ditandai jujur. *(Update 2026-10-23: runtime-tested via launchd user-domain context tanpa grant AX — exit 3; lihat `docs/ARENA-VERIFICATION.md` §6.)* |
 | Stale target: prompt, tanpa crash/hang/retry/false success | ✅ | §5: exit 4, error typed, <1s |
 | Log tanpa judul/serial/UUID/kredensial | ✅ | Output hanya angka geometry + pid |
 | Host/OS exact + workspaces disabled tercatat | ✅ | §1; tidak ada kode Spaces di crate |
@@ -178,7 +178,7 @@ oldtoken-exit=4
 
 ## 7. Keterbatasan jujur
 
-- Permission-denied path tidak diuji runtime (lihat §6).
+- Permission-denied path tidak diuji runtime pada saat laporan ini; *(update 2026-10-23: runtime-tested via launchd user-domain context tanpa grant AX — exit 3; lihat `docs/ARENA-VERIFICATION.md` §6).*
 - Single display 1.0x; multi-display/multi-DPI tidak diuji.
 - Host: model identifier sistem (MacBookPro16,2) ≠ perangkat fisik owner (ThinkPad X13 Yoga) — lihat §1.
 - Windows 11: belum ada mesin target; klaim Windows menunggu native test.

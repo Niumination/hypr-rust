@@ -83,7 +83,7 @@ stale-exit=4
 - `move`/`resize` read the current frame, then apply an explicit `set_window_frame` (verified, rollback on failure). `raise` is explicit only.
 - Fixture verification extracted to `src/fixture.rs` and shared by `ax-probe` (M1) and `ax-keyboard` (M2) — no duplicated gate logic.
 - Every failure path reports a typed error with rollback status and best-known frame via `format_ax_error` for ALL error variants: transaction variants carry their own `actual` frame + `rollback_restored`; non-transaction variants report `rollback_restored=n/a` + the caller-supplied frame (`<unavailable>` when none was read). `move`/`resize` pass the pre-read frame so `InvalidGeometry` reports it. The `error_message` dispatch propagates `best_frame` for `PermissionDenied`/`StaleTarget` too, and the `Unregistered` (precondition failure before AX) path reports `rollback_restored=n/a; frame=<unavailable>`. Unit-tested for all variants + dispatch regression.
-- Permission-denied path: NOT RUNTIME TESTED (would disrupt TCC).
+- Permission-denied path: **runtime-tested 2026-10-23** via an AX-untrusted launchd user-domain context (exit 3; see `docs/ARENA-VERIFICATION.md` §6).
 
 ## Branch / workflow
 
@@ -97,5 +97,5 @@ stale-exit=4
 - Single display 1.0x; multi-display/multi-DPI untested.
 - AX is not transactional — rollback is best-effort (M1 §7).
 - Lock check is a test guard, not absolute PID-reuse proof (M1 C14).
-- Permission-denied path likely NOT RUNTIME TESTED (would disrupt TCC).
+- Permission-denied path — runtime-tested 2026-10-23 via an AX-untrusted launchd user-domain context (exit 3; see `docs/ARENA-VERIFICATION.md` §6).
 - Proves only the owner's Hackintosh/Tahoe host, not general macOS.
