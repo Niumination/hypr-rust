@@ -34,7 +34,7 @@ Implemented with best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-b
 | Two-window rollback | plan `[A→new frame, B→new frame, <live pid with no window>]` | third target failed (`-25204 cannotComplete`) after A and B were applied; batch stopped and restored A and B, both verified by read-back; exit 1 |
 | Permission-denied | read-only `ax-probe frame 1` in an AX-untrusted launchd user-domain job | `error: permission denied (Accessibility not granted)`, exit 3; no AX call made; one context only (see `ARENA-VERIFICATION.md` §6) |
 
-**Exact host/build:** as in Spike 0 record; AX granted to the controlling terminal app. **Evidence & caveats:** `docs/ARENA-VERIFICATION.md` §6 — executed on the owner's host, not independently run by arena.ai; second window B came from a locally compiled test-only unregistered spawner variant (not committed, not part of PR #1).
+**Exact host/build:** as in Spike 0 record; AX granted to the controlling terminal app. **Evidence & caveats:** `docs/ARENA-VERIFICATION.md` §6 — executed on the owner's host, not independently run by arena.ai; second window B came from the committed `spawn-target --no-register` mode of the spike harness (auxiliary target only; spike branch head `7636eab`, PR #1); batch code and CLI built from `work/phase1-domain` `085f5cb`.
 
 ## Spike 2 — native workspace contract (conditional feature gate)
 
