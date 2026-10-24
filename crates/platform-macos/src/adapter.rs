@@ -40,6 +40,7 @@ static K_AX_POSITION: OnceLock<Key> = OnceLock::new();
 static K_AX_SIZE: OnceLock<Key> = OnceLock::new();
 static K_AX_RAISE: OnceLock<Key> = OnceLock::new();
 static K_AX_FOCUSED_WINDOW: OnceLock<Key> = OnceLock::new();
+static K_AX_SUBROLE: OnceLock<Key> = OnceLock::new();
 
 fn k_ax_windows_attribute() -> ffi::CFStringRef {
     K_AX_WINDOWS
@@ -74,6 +75,12 @@ fn k_ax_raise_action() -> ffi::CFStringRef {
 fn k_ax_focused_window_attribute() -> ffi::CFStringRef {
     K_AX_FOCUSED_WINDOW
         .get_or_init(|| Key(ffi::cf_string_from_static(b"AXFocusedWindow\0")))
+        .0
+}
+
+fn k_ax_subrole_attribute() -> ffi::CFStringRef {
+    K_AX_SUBROLE
+        .get_or_init(|| Key(ffi::cf_string_from_static(b"AXSubrole\0")))
         .0
 }
 
@@ -748,6 +755,74 @@ pub struct MacObservation {
 /// Monotonic observation revision. Adapter-local; never persisted.
 static OBSERVATION_REVISION: AtomicU64 = AtomicU64::new(1);
 
+/// Map one window to its planner role before user rules apply.
+///
+/// Mandatory exclusions by identity (checked first, not overridable by any
+/// config value; the planner always excludes them):
+/// - the pid equals this controller's own pid ([`WindowRole::OwnApplication`]).
+///
+/// Policy classification from the Accessibility subrole (the planner excludes
+/// these only when the plan's dialog policy says so):
+/// - dialog/floating subroles → [`WindowRole::Dialog`]: the canonical dialog
+///   subroles (`AXDialogSubrole`, `AXSystemDialogSubrole`,
+///   `AXFloatingWindowSubrole`) and `AXSystemFloatingWindow` (runtime-observed
+///   on Tahoe 26.7.1 for a floating utility panel via the Swift probe script,
+///   not assumed from documentation).
+/// - notification surfaces → [`WindowRole::System`]: `AXNotificationCenterAlert`,
+///   `AXNotificationCenterBanner`.
+///
+/// A missing or unrecognized subrole (including the ordinary
+/// `AXStandardWindow` observed for plain `NSWindow`s) classifies as an
+/// ordinary [`WindowRole::Application`]. This is the documented policy
+/// surface, not a mandatory gate: mandatory exclusions rest on identity
+/// (own pid) and on the write-time verified-write-plus-rollback contract.
+pub fn classify_window(pid_is_own: bool, subrole: Option<&str>) -> WindowRole {
+    if pid_is_own {
+        return WindowRole::OwnApplication;
+    }
+    match subrole {
+        Some(
+            "AXDialogSubrole"
+            | "AXSystemDialogSubrole"
+            | "AXFloatingWindowSubrole"
+            | "AXSystemFloatingWindow",
+        ) => WindowRole::Dialog,
+        Some("AXNotificationCenterAlert" | "AXNotificationCenterBanner") => WindowRole::System,
+        _ => WindowRole::Application,
+    }
+}
+
+/// Read a window's `AXSubrole` string, or `None` when the attribute is
+/// unavailable (unsupported or no value is normal for ordinary windows).
+fn window_subrole(element: &AxWindow) -> Option<String> {
+    // SAFETY: element is live; the copy returns an owned ref or null.
+    let mut value: ffi::CFTypeRef = ptr::null();
+    let code = unsafe {
+        ffi::AXUIElementCopyAttributeValue(element.element(), k_ax_subrole_attribute(), &mut value)
+    };
+    if code != 0 || value.is_null() {
+        return None;
+    }
+    // SAFETY: value is an owned ref or null; the guard releases it.
+    let owned = CfOwned(value);
+    let mut buffer = [0u8; 64];
+    // SAFETY: owned.0 is a live CFStringRef and buffer meets capacity + the
+    // documented encoding.
+    let ok = unsafe {
+        ffi::CFStringGetCString(
+            owned.0 as ffi::CFStringRef,
+            buffer.as_mut_ptr() as *mut i8,
+            buffer.len() as isize,
+            ffi::K_CF_STRING_ENCODING_UTF8,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(0);
+    Some(String::from_utf8_lossy(&buffer[..end]).into_owned())
+}
+
 /// Build a snapshot and ID map from enumerated windows. Pure: it makes no OS
 /// calls, so the planner/executor seam is unit-testable with several windows
 /// from one process.
@@ -761,18 +836,19 @@ static OBSERVATION_REVISION: AtomicU64 = AtomicU64::new(1);
 /// reliable exclusion (it can disagree with a verified write), so settable is
 /// not used as the eligibility gate; the real gate is the verified write plus
 /// rollback in [`MacAxAdapter::set_window_frame`] and
-/// [`crate::batch::apply_batch`]. Every enumerated window is classified
-/// [`WindowRole::Application`]: subrole (dialog) classification is not
-/// implemented yet.
+/// [`crate::batch::apply_batch`]. Every entry carries a
+/// [`WindowRole`] from [`classify_window`]: the planner excludes
+/// `OwnApplication`/`System`/`Desktop` unconditionally and dialogs per the
+/// plan's dialog policy.
 pub fn observation_from_windows(
     display: Rect,
-    windows: &[(WindowKey, Rect)],
+    windows: &[(WindowKey, Rect, WindowRole)],
     focused: Option<WindowKey>,
 ) -> MacObservation {
     let display_id = DisplayId(0);
     let mut snapshots = Vec::with_capacity(windows.len());
     let mut map = WindowIdMap::default();
-    for (key, frame) in windows {
+    for (key, frame, role) in windows {
         let id = WindowId(key.0);
         map.pairs.push((id, *key));
         snapshots.push(WindowSnapshot {
@@ -780,7 +856,7 @@ pub fn observation_from_windows(
             display: display_id,
             frame: *frame,
             constraints: WindowConstraints::UNBOUNDED,
-            role: WindowRole::Application,
+            role: *role,
             capabilities: WindowCapabilities {
                 can_move: true,
                 can_resize: true,
@@ -789,7 +865,7 @@ pub fn observation_from_windows(
         });
     }
     let focused_window = focused
-        .filter(|key| windows.iter().any(|(observed, _)| observed == key))
+        .filter(|key| windows.iter().any(|(observed, _, _)| observed == key))
         .map(|key| WindowId(key.0));
     MacObservation {
         snapshot: PlatformSnapshot {
@@ -807,13 +883,14 @@ pub fn observation_from_windows(
     }
 }
 
-/// One enumerated window: runtime key, owned AX handle, and the frame read at
-/// enumeration time.
+/// One enumerated window: runtime key, owned AX handle, the frame read at
+/// enumeration time, and the classification from [`classify_window`].
 #[derive(Debug)]
 struct MacWindowEntry {
     key: WindowKey,
     handle: AxWindow,
     frame: Rect,
+    role: WindowRole,
 }
 
 /// A resolved set of windows for one process, owning the AX element handles.
@@ -847,15 +924,17 @@ impl MacWindowSet {
         self.windows.iter().any(|entry| entry.key == key)
     }
 
-    /// `(key, frame)` for every window, in adapter order.
-    pub fn entries(&self) -> impl Iterator<Item = (WindowKey, Rect)> + '_ {
-        self.windows.iter().map(|entry| (entry.key, entry.frame))
+    /// `(key, frame, role)` for every window, in adapter order.
+    pub fn entries(&self) -> impl Iterator<Item = (WindowKey, Rect, WindowRole)> + '_ {
+        self.windows
+            .iter()
+            .map(|entry| (entry.key, entry.frame, entry.role))
     }
 
     /// Snapshot this set against `display` for the pure planner, plus the ID
     /// map the executor needs to turn placements back into native targets.
     pub fn observe(&self, display: Rect) -> MacObservation {
-        let entries: Vec<(WindowKey, Rect)> = self.entries().collect();
+        let entries: Vec<(WindowKey, Rect, WindowRole)> = self.entries().collect();
         observation_from_windows(display, &entries, self.focused)
     }
 
@@ -892,7 +971,8 @@ impl MacAxAdapter {
     /// Enumerate the windows of the process owned by `pid`.
     ///
     /// Reads `kAXWindowsAttribute`, checks each element's owning pid
-    /// (`AXUIElementGetPid`), reads its frame, and records which window
+    /// (`AXUIElementGetPid`), reads its frame and its `AXSubrole`
+    /// classification ([`classify_window`]), and records which window
     /// (`kAXFocusedWindowAttribute`) is focused. Keys are assigned in list
     /// order. Fails closed: a dead pid is [`AxError::StaleTarget`], a process
     /// with no windows is [`AxError::NoWindows`], and a foreign element or an
@@ -962,6 +1042,8 @@ impl MacAxAdapter {
             let retained = unsafe { ffi::CFRetain(raw as ffi::CFTypeRef) } as ffi::AXUIElementRef;
             let handle = AxWindow::from_raw(retained);
             let frame = self.window_frame(&handle)?;
+            let subrole = window_subrole(&handle);
+            let role = classify_window(pid == std::process::id(), subrole.as_deref());
             let key = WindowKey(windows.len() as u64);
             if !focused.0.is_null() {
                 // SAFETY: raw and focused.0 are live CFTypeRefs.
@@ -970,7 +1052,12 @@ impl MacAxAdapter {
                     focused_key = Some(key);
                 }
             }
-            windows.push(MacWindowEntry { key, handle, frame });
+            windows.push(MacWindowEntry {
+                key,
+                handle,
+                frame,
+                role,
+            });
         }
         if windows.is_empty() {
             return Err(AxError::NoWindows);
@@ -1111,6 +1198,91 @@ mod tests {
             Rect::new(100.0, 668.0, 420.0, 315.0),
             1.0
         ));
+    }
+
+    #[test]
+    fn classify_window_maps_subroles_and_own_pid() {
+        // The mandatory identity gate wins over every subrole.
+        assert_eq!(
+            classify_window(true, Some("AXDialogSubrole")),
+            WindowRole::OwnApplication
+        );
+        // Known dialog subroles are policy-excludable, not mandatory.
+        for subrole in [
+            "AXDialogSubrole",
+            "AXSystemDialogSubrole",
+            "AXFloatingWindowSubrole",
+            "AXSystemFloatingWindow",
+        ] {
+            assert_eq!(classify_window(false, Some(subrole)), WindowRole::Dialog);
+        }
+        // Notification surfaces are system UI: always excluded by the planner.
+        for subrole in ["AXNotificationCenterAlert", "AXNotificationCenterBanner"] {
+            assert_eq!(classify_window(false, Some(subrole)), WindowRole::System);
+        }
+        // A missing, ordinary or unknown subrole stays an application window.
+        assert_eq!(classify_window(false, None), WindowRole::Application);
+        assert_eq!(
+            classify_window(false, Some("AXStandardWindow")),
+            WindowRole::Application
+        );
+        assert_eq!(
+            classify_window(false, Some("AXUnknownSubrole")),
+            WindowRole::Application
+        );
+    }
+
+    #[test]
+    fn observation_carries_roles_into_the_snapshot() {
+        let observation = observation_from_windows(
+            Rect::new(0.0, 0.0, 1200.0, 800.0),
+            &[
+                (
+                    WindowKey(0),
+                    Rect::new(0.0, 0.0, 100.0, 100.0),
+                    WindowRole::Application,
+                ),
+                (
+                    WindowKey(1),
+                    Rect::new(100.0, 0.0, 100.0, 100.0),
+                    WindowRole::Dialog,
+                ),
+                (
+                    WindowKey(2),
+                    Rect::new(0.0, 0.0, 50.0, 50.0),
+                    WindowRole::OwnApplication,
+                ),
+            ],
+            Some(WindowKey(0)),
+        );
+        let roles: Vec<WindowRole> = observation
+            .snapshot
+            .windows
+            .iter()
+            .map(|window| window.role)
+            .collect();
+        assert_eq!(
+            roles,
+            vec![
+                WindowRole::Application,
+                WindowRole::Dialog,
+                WindowRole::OwnApplication
+            ]
+        );
+        // The planner excludes OwnApplication and (by default) Dialog, so a
+        // plan over this observation tiles exactly one window.
+        let plan = layout_core::plan_snapshot(
+            &observation.snapshot,
+            DisplayId(0),
+            layout_core::LayoutKind::MasterStack,
+            layout_core::LayoutConfig::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(plan.placements.len(), 1);
+        let excluded_reasons: Vec<_> = plan.excluded.iter().map(|item| item.reason).collect();
+        assert!(excluded_reasons.contains(&layout_core::ExclusionReason::OwnApplication));
+        assert!(excluded_reasons.contains(&layout_core::ExclusionReason::DialogPolicy));
     }
 
     // MARK: - Transaction contract (mock FrameOps; no Apple frameworks)
@@ -1402,8 +1574,16 @@ mod tests {
         let observation = observation_from_windows(
             Rect::new(0.0, 0.0, 1200.0, 800.0),
             &[
-                (WindowKey(0), Rect::new(10.0, 10.0, 200.0, 200.0)),
-                (WindowKey(1), Rect::new(220.0, 10.0, 200.0, 200.0)),
+                (
+                    WindowKey(0),
+                    Rect::new(10.0, 10.0, 200.0, 200.0),
+                    WindowRole::Application,
+                ),
+                (
+                    WindowKey(1),
+                    Rect::new(220.0, 10.0, 200.0, 200.0),
+                    WindowRole::Application,
+                ),
             ],
             Some(WindowKey(1)),
         );
@@ -1423,7 +1603,11 @@ mod tests {
     fn observation_ignores_focused_window_that_was_not_observed() {
         let observation = observation_from_windows(
             Rect::new(0.0, 0.0, 1200.0, 800.0),
-            &[(WindowKey(0), Rect::new(0.0, 0.0, 100.0, 100.0))],
+            &[(
+                WindowKey(0),
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                WindowRole::Application,
+            )],
             Some(WindowKey(7)),
         );
         assert_eq!(observation.snapshot.focused_window, None);

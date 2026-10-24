@@ -244,7 +244,7 @@ func removeRegistration() {
 
 // MARK: - Controlled target window (our own app; never a user window)
 
-func spawnTarget(register: Bool, count: Int) {
+func spawnTarget(register: Bool, count: Int, dialog: Bool) {
     let app = NSApplication.shared
     app.setActivationPolicy(.regular)
 
@@ -291,6 +291,21 @@ func spawnTarget(register: Bool, count: Int) {
         win.isReleasedWhenClosed = false
         windows.append(win)
     }
+    var dialogPanel: NSWindow? = nil
+    if dialog {
+        // A floating utility panel: Accessibility classifies it through a
+        // dialog-class subrole, so the planner's dialog policy applies to it.
+        // Like every window here it belongs to THIS process.
+        let panel = NSPanel(
+            contentRect: NSRect(x: 1140, y: 420, width: 320, height: 200),
+            styleMask: [.titled, .utilityWindow, .nonactivatingPanel],
+            backing: .buffered, defer: false)
+        panel.title = "HYPR-SPIKE-DIALOG"
+        panel.isReleasedWhenClosed = false
+        panel.isFloatingPanel = true
+        panel.orderFrontRegardless()
+        dialogPanel = panel
+    }
     for win in windows {
         win.makeKeyAndOrderFront(nil)
     }
@@ -303,12 +318,18 @@ func spawnTarget(register: Bool, count: Int) {
         for win in windows {
             print("HYPR-SPIKE-TARGET pid=\(getpid()) frame=\(win.frame)")
         }
+        if let panel = dialogPanel {
+            print("HYPR-SPIKE-DIALOG pid=\(getpid()) frame=\(panel.frame)")
+        }
         print("fixture registered at ~/.hypr-rust/fixture-target.json (lock held for process lifetime)")
     } else {
         // Auxiliary batch targets: self-owned windows without fixture authority.
         // They are valid geometry targets, never a master and never a registration owner.
         for win in windows {
             print("HYPR-SPIKE-TARGET pid=\(getpid()) frame=\(win.frame)")
+        }
+        if let panel = dialogPanel {
+            print("HYPR-SPIKE-DIALOG pid=\(getpid()) frame=\(panel.frame)")
         }
         print("unregistered auxiliary windows: no fixture lock, no registration")
     }
@@ -341,12 +362,13 @@ case "record":
     osRecord()
     discover()
 case "spawn-target":
-    spawnTarget(register: !args.contains("--no-register"), count: spawnCount(args))
+    spawnTarget(register: !args.contains("--no-register"), count: spawnCount(args),
+                dialog: args.contains("--dialog"))
 case "space-observe":
     spaceObserve(seconds: Double(argValue("--seconds") ?? "30") ?? 30)
 case "space-switch":
     spaceSwitch(dir: argValue("--dir") ?? "right", pid: (argValue("--pid")).flatMap(pid_t.init),
                 execute: args.contains("--execute"))
 default:
-    print("modes: record | spawn-target [--no-register] | space-observe [--seconds n] | space-switch --dir right|left [--pid pid] [--execute]")
+    print("modes: record | spawn-target [--no-register] [--count n] [--dialog] | space-observe [--seconds n] | space-switch --dir right|left [--pid pid] [--execute]")
 }

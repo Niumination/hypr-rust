@@ -61,6 +61,17 @@ The batch above addressed targets by pid, which cannot name more than one window
 
 **Not done:** no event loop or auto-tiling, no settings UI (the config file backs the shell), no hotkeys, no diagnostics UI (`Diagnostics` appends to `~/.hypr-rust/shell.log`), no signed bundle. Note: `-[NSMenuItem initWithTitle:action:keyEquivalent:]` raised an Objective-C exception on this build, so items are created with `+new` plus `setTitle:`/`setAction:`/`setTarget:` instead.
 
+### Spike 1 addendum — per-window subrole classification (recorded result)
+
+Devices/windows carries a role the planner's exclusion logic consumes: `OwnApplication` (pid == controller pid — mandatory, not overridable), `System` (notification surfaces), `Dialog` (dialog/floating subroles — excluded unless allowed by the plan's dialog policy), ordinary `Application` otherwise. On Tahoe 26.7.1 a floating utility `NSPanel` reports `AXSystemFloatingWindow` and a plain `NSWindow` reports `AXStandardWindow` (runtime-observed through a Swift probe script; `AXDialogSubrole`/`AXSystemDialogSubrole`/`AXFloatingWindowSubrole` are the canonical dialog subroles kept in the policy list). `ax-probe windows` prints `key=<n> role=<application|dialog|own-application|system|desktop>` (still no titles). The `spawn-target` harness grew `--dialog` (one floating utility panel next to the ordinary windows).
+
+**Host run (2026-10-24, owner host, AX granted, self-owned fixture `--count 2 --dialog`):**
+- Enumeration classified the panel `role=dialog` and both ordinary windows `role=application`.
+- Default reflow (dialogs excluded by policy): `master-stack: applied 2 window(s), 1 excluded`; the dialog frame stayed exactly `(1350,465,320,224)` before and after read-back; the two application windows tiled as in the earlier records.
+- `include_dialogs=true` flipped on: the plan covered all three windows, but the **floating panel rejected the size write** (AX `-25200` after the position write) — the batch stopped at that key and the verified rollback restored the panel to its exact pre-write frame `(1350,465,320,224)`; the other two windows kept their already-correct tiling frames. This closes the loop on the M3 rule that the *write-time* verified-write-plus-rollback is the real gate, while `AXUIElementIsAttributeSettable` (which reports `settable=false` for `AXSize` on the panel class) is not.
+- Restored `include_dialogs=false` re-run was idempotent (`applied 2 window(s), 1 excluded`).
+- Rust checks: fmt OK, clippy `-D warnings` clean; platform-macos lib **35/35** (+2 `ax-keyboard`) with classification/wiring unit tests; workspace **23/23**.
+
 ## Spike 2 — native workspace contract (conditional feature gate)
 
 Required set—test each operation independently, then as an end-to-end workflow:
