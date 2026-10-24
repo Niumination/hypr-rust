@@ -80,6 +80,22 @@ The menu grew a `Settings…` action opening a small `NSWindow` panel (`NSPopUpB
 
 **Not done:** the panel edits the config file only — hot-reload of a reflow's dialog policy is per command, there are no per-window/user rules UI yet, no hotkeys, no signed bundle.
 
+### Spike 1 addendum — per-app rules over the dialog policy (recorded result)
+
+`config.json` gains an optional `"rules"` array; the flat keys are unchanged, and a file with no `rules` behaves exactly as before. One entry is `{"bundle": "<id>", "pid": <int>, "dialogs": "include"|"exclude"|"default"}`; the matchers identify the **app** (bundle id read via public `NSRunningApplication`; pid direct), both may be given (then both must hold) — a rule that matches nothing fails closed (`rules: Invalid`). Rules can only shift the **ordinary-app dialog policy** of the app they match: mandatory exclusions (`OwnApplication`, `System`, `Desktop`) and the write-time gate are untouched and can never be unlocked by a rule. The first matching rule wins. The planner receives the per-window overrides through `plan_snapshot_with_rules`; `plan_snapshot` stays rule-free and byte-identical. A panel **Save preserves the loaded rules** — the panel edits the flat keys, not the rules.
+
+**Host run (2026-10-24, owner host, `--count 2 --dialog` fixture, `ax-shell --self-test`):**
+- `fixture bundle id = None` is expected for the unsigned harness app — identity falls back to pid there (logged, not assumed).
+- Baseline reflow: `applied 2 window(s), 1 excluded`.
+- Rule **exclude** with `include_dialogs=true`: still `applied 2, 1 excluded` — the single app rule pushed the dialog back out even though the global switch said in.
+- Rule **include** with `include_dialogs=false`: the plan now covered the dialog, and the floating panel **rejected the size write** (AX `-25200`) with the verified rollback restoring its exact `320×224` frame — the same outcome as the global `include_dialogs` path above: a rule widens the *policy*, never the *capability*.
+- A seeded rule survived a panel custom-save (`rules: [bundle=com.example.seeded dialogs=exclude]`); an invalid `master_ratio 5` was still refused without touching the file; after `Reset to defaults` the diagnostics line reads the exact file state (`layout=master-stack ... rules=0`) — which also exposed and fixed a real staleness bug: `Reset` previously reset only the file and the in-memory config stayed stale until restart.
+- Rust: fmt OK, clippy `-D warnings` clean, lib **43/43** (+2 `ax-keyboard`), workspace **27/27** (6 config rules tests, 4 planner rule tests).
+
+**Shell polish in the same change:** the menu label flips `Pause`↔`Resume` with the state; the settings summary reports `rules=<n>`; `Diagnostics` appends one structured line (status + settings summary) instead of echoing the status line alone.
+
+**Not done:** no rules editor UI (rules are hand-written JSON; the panel shows their count only), no window-title matching (titles are never read anywhere in the shell), and a rule can never override the write gate or a mandatory exclusion.
+
 ## Spike 2 — native workspace contract (conditional feature gate)
 
 Required set—test each operation independently, then as an end-to-end workflow:
