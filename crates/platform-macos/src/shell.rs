@@ -14,11 +14,11 @@ use std::ffi::CString;
 use std::os::raw::c_char;
 use std::sync::Mutex;
 
-use layout_core::{DisplayId, Rect};
+use layout_core::{DisplayId, PlatformSnapshot, Rect, WindowRole};
 
 use crate::adapter::MacAxAdapter;
 use crate::batch;
-use crate::config::{Config, ConfigError};
+use crate::config::{dialog_policy_for, Config, ConfigError, DialogPolicy, WindowRule};
 use crate::ffi::{self, CGFloat};
 use crate::{fixture, process_alive};
 
@@ -251,8 +251,14 @@ extern "C" fn action_toggle_pause(_this: Id, _cmd: Sel) {
 }
 
 extern "C" fn action_reset_defaults(_this: Id, _cmd: Sel) {
-    match Config::default().save() {
-        Ok(()) => set_status("settings reset to defaults"),
+    let defaults = Config::default();
+    match defaults.save() {
+        Ok(()) => {
+            // Adopt the defaults immediately so the menu, the next reflow and
+            // the diagnostics never act on a config the file no longer contains.
+            STATE.lock().unwrap().config = Some(defaults);
+            set_status("settings reset to defaults");
+        }
         Err(error) => set_status(&format!("reset failed: {error}")),
     }
     refresh_menu();
@@ -287,13 +293,18 @@ fn save_settings_from_panel() {
         )
     };
     match Config::from_json(&body) {
-        Ok(config) => match config.save() {
-            Ok(()) => {
-                STATE.lock().unwrap().config = Some(config);
-                set_status("settings saved");
+        Ok(mut config) => {
+            // The panel does not edit rules; keep the loaded ones so a panel
+            // save never silently erases a hand-written rules list.
+            config.rules = current_config().rules;
+            match config.save() {
+                Ok(()) => {
+                    STATE.lock().unwrap().config = Some(config);
+                    set_status("settings saved");
+                }
+                Err(error) => set_status(&format!("settings save failed: {error}")),
             }
-            Err(error) => set_status(&format!("settings save failed: {error}")),
-        },
+        }
         Err(error) => {
             set_status(&format!("settings invalid: {error}"));
         }
@@ -343,8 +354,15 @@ extern "C" fn action_close_settings(_this: Id, _cmd: Sel) {
 }
 
 extern "C" fn action_diagnostics(_this: Id, _cmd: Sel) {
-    let summary = status_line();
-    append_log(&summary);
+    let state = STATE.lock().unwrap();
+    let config = state.config.clone().unwrap_or_default();
+    let line = format!(
+        "diagnostics: {} \u{b7} {}",
+        status_line_with(&state),
+        settings_line_with(&config)
+    );
+    drop(state);
+    append_log(&line);
 }
 
 extern "C" fn action_quit(_this: Id, _cmd: Sel) {
@@ -474,6 +492,31 @@ unsafe fn utf8_string(value: Id) -> String {
     unsafe { std::ffi::CStr::from_ptr(bytes) }
         .to_string_lossy()
         .into_owned()
+}
+
+/// Bundle id of a running app via public `NSRunningApplication`. Unsigned CLI
+/// apps legitimately report no bundle id. This is app **identity** used for
+/// user rules; window titles are never read anywhere in the shell.
+///
+/// SAFETY: AppKit class/instance selectors on the main thread.
+unsafe fn app_bundle_id(pid: u32) -> Option<String> {
+    let app = unsafe {
+        msg_i32(
+            class("NSRunningApplication"),
+            sel("runningApplicationWithProcessIdentifier:"),
+            pid as i32,
+        )
+    };
+    if app.is_null() {
+        return None;
+    }
+    let bundle = unsafe { msg0(app, sel("bundleIdentifier")) };
+    let text = unsafe { utf8_string(bundle) };
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 /// Populate the panel from `config`.
@@ -708,7 +751,10 @@ unsafe fn separator() -> Id {
 unsafe fn build_menu(target: Id) -> Id {
     // SAFETY: documented class/instance initialisers.
     let menu = unsafe { msg0(class("NSMenu"), sel("new")) };
-    let config = current_config();
+    let (config, paused) = {
+        let state = STATE.lock().unwrap();
+        (state.config.clone().unwrap_or_default(), state.paused)
+    };
     unsafe {
         msg_bool(menu, sel("setAutoenablesItems:"), false);
         add_status(menu, &status_line());
@@ -719,7 +765,12 @@ unsafe fn build_menu(target: Id) -> Id {
             &format!("Reflow: {}", config.kind_name()),
             "reflow:",
         );
-        add_action(menu, target, "Pause", "togglePause:");
+        add_action(
+            menu,
+            target,
+            if paused { "Resume" } else { "Pause" },
+            "togglePause:",
+        );
         msg_void_id(menu, sel("addItem:"), separator());
         add_status(menu, &settings_line());
         add_action(menu, target, "Settings\u{2026}", "showSettings:");
@@ -752,6 +803,12 @@ fn refresh_menu() {
 /// One-line status: paused state, Accessibility trust, fixture, last result.
 fn status_line() -> String {
     let state = STATE.lock().unwrap();
+    status_line_with(&state)
+}
+
+/// The status line from an already-locked state: callers that hold `STATE`
+/// (diagnostics) use this so the mutex is never re-locked.
+fn status_line_with(state: &ShellState) -> String {
     let trust = match MacAxAdapter::connect() {
         Ok(_) => "Accessibility: granted",
         Err(_) => "Accessibility: denied",
@@ -783,14 +840,20 @@ fn accessibility_line() -> String {
 fn settings_line() -> String {
     let state = STATE.lock().unwrap();
     let config = state.config.clone().unwrap_or_default();
+    settings_line_with(&config)
+}
+
+/// The settings summary from a config (no re-lock; diagnostics calls this).
+fn settings_line_with(config: &Config) -> String {
     let auto_tiling = if config.auto_tiling { "on" } else { "off" };
     let dialogs = if config.include_dialogs { "in" } else { "out" };
     format!(
-        "settings: layout={} gaps={}/{} ratio={} auto-tiling={auto_tiling} dialogs={dialogs}",
+        "settings: layout={} gaps={}/{} ratio={} auto-tiling={auto_tiling} dialogs={dialogs} rules={}",
         config.kind_name(),
         fmt_num(config.layout.outer_gap),
         fmt_num(config.layout.inner_gap),
         fmt_num(config.layout.master_ratio),
+        config.rules.len(),
     )
 }
 
@@ -839,6 +902,34 @@ fn work_area() -> Rect {
     )
 }
 
+/// Per-window rule overrides for one reflow: the app's first matching rule
+/// decides the dialog policy for that app's Dialog windows only; mandatory
+/// roles never appear here (planner gates keep them excluded).
+///
+/// SAFETY: main thread; AppKit query only (bundle id, never titles).
+fn dialog_policy_rules(
+    snapshot: &PlatformSnapshot,
+    pid: u32,
+    rules: &[WindowRule],
+    include_dialogs: bool,
+) -> Vec<layout_core::WindowDialogRule> {
+    let bundle = unsafe { app_bundle_id(pid) };
+    let include = match dialog_policy_for(rules, pid, bundle.as_deref()) {
+        DialogPolicy::Exclude => false,
+        DialogPolicy::Include => true,
+        DialogPolicy::Default => include_dialogs,
+    };
+    snapshot
+        .windows
+        .iter()
+        .filter(|window| window.role == WindowRole::Dialog)
+        .map(|window| layout_core::WindowDialogRule {
+            window: window.id,
+            include,
+        })
+        .collect()
+}
+
 /// Run one explicit reflow against the registered fixture.
 ///
 /// The layout, gaps and dialog policy come from the loaded config; only an
@@ -849,7 +940,7 @@ fn perform_reflow() {
         set_status("paused");
         return;
     }
-    let (kind, layout, include_dialogs, label) = {
+    let (kind, layout, include_dialogs, label, rules) = {
         let config = current_config();
         let (kind, layout) = config.plan_config();
         (
@@ -857,6 +948,7 @@ fn perform_reflow() {
             layout,
             config.include_dialogs,
             config.kind_name().to_string(),
+            config.rules.clone(),
         )
     };
     let adapter = match MacAxAdapter::connect() {
@@ -881,12 +973,14 @@ fn perform_reflow() {
         }
     };
     let observation = set.observe(work_area());
-    let plan = match layout_core::plan_snapshot(
+    let dialog_rules = dialog_policy_rules(&observation.snapshot, pid, &rules, include_dialogs);
+    let plan = match layout_core::plan_snapshot_with_rules(
         &observation.snapshot,
         DisplayId(0),
         kind,
         layout,
         include_dialogs,
+        &dialog_rules,
     ) {
         Ok(plan) => plan,
         Err(error) => {
@@ -1110,6 +1204,57 @@ pub fn self_test() {
         perform_reflow();
         append_log(&format!("self-test: after reflow = {}", status_line()));
 
+        // Rules: the first matching rule shifts the dialog policy for that
+        // app only. Rule exclude wins over a global include, then rule include
+        // wins over a global exclude; both end with a reset so the panel
+        // exercise starts from plain defaults.
+        if let Some(pid) = fixture::registered_fixture_pid().filter(|pid| process_alive(*pid)) {
+            let bundle = app_bundle_id(pid);
+            append_log(&format!("self-test: fixture bundle id = {bundle:?}"));
+
+            // Rule exclude with global include: the dialog is dropped.
+            let mut config = Config {
+                include_dialogs: true,
+                ..Config::default()
+            };
+            config.rules.push(WindowRule {
+                bundle: None,
+                pid: Some(pid),
+                dialogs: DialogPolicy::Exclude,
+            });
+            config.save().expect("self-test rules config write");
+            STATE.lock().unwrap().config = Some(config);
+            perform_reflow();
+            append_log(&format!(
+                "self-test: rule exclude + dialogs=on = {}",
+                status_line()
+            ));
+
+            // Rule include with global exclude: the dialog is tiled.
+            let mut config = Config::default();
+            config.rules.push(WindowRule {
+                bundle: None,
+                pid: Some(pid),
+                dialogs: DialogPolicy::Include,
+            });
+            config.save().expect("self-test rules config write");
+            STATE.lock().unwrap().config = Some(config);
+            perform_reflow();
+            append_log(&format!(
+                "self-test: rule include + dialogs=off = {}",
+                status_line()
+            ));
+
+            action_reset_defaults(std::ptr::null(), std::ptr::null());
+            STATE.lock().unwrap().config = Some(Config::load().unwrap_or_default());
+            append_log(&format!(
+                "self-test: defaults restored after rules = {}",
+                status_line()
+            ));
+        } else {
+            append_log("self-test: no live fixture — rules exercise skipped");
+        }
+
         // Settings panel: open through the same path the menu action uses,
         // read the controls back, save custom values through the Save
         // button's own helper, prove an invalid value is refused, then
@@ -1129,6 +1274,15 @@ pub fn self_test() {
             append_log(&format!(
                 "self-test: panel visible={visible} popup={popup:?} outer={outer} inner={inner} ratio={ratio} auto={auto} dialogs={dialogs}"
             ));
+            // Seed a rule the panel does not edit, to prove a panel save
+            // never silently erases a hand-written rules list.
+            let mut seeded = Config::load().unwrap_or_default();
+            seeded.rules.push(WindowRule {
+                bundle: Some("com.example.seeded".to_string()),
+                pid: None,
+                dialogs: DialogPolicy::Exclude,
+            });
+            STATE.lock().unwrap().config = Some(seeded);
             // 1) A valid custom value saved through the Save button's code path.
             select_popup_title(panel.popup, "columns");
             set_field_text(panel.outer, "20");
@@ -1158,6 +1312,9 @@ pub fn self_test() {
                 "self-test: final settings status = {}",
                 STATE.lock().unwrap().status.clone()
             ));
+            // 4) Diagnostics through the action's own body (no mouse click):
+            // one structured line into the shell log.
+            action_diagnostics(std::ptr::null(), std::ptr::null());
         }
         msg_void(pool, sel("drain"));
     }
