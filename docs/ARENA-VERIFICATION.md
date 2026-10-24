@@ -70,7 +70,7 @@ MACOSX_DEPLOYMENT_TARGET=26.0 cargo test --workspace          # 23/23
 cargo fmt --manifest-path crates/platform-macos/Cargo.toml --check
 MACOSX_DEPLOYMENT_TARGET=26.0 cargo clippy --manifest-path crates/platform-macos/Cargo.toml --all-targets -- -D warnings
 cd crates/platform-macos
-MACOSX_DEPLOYMENT_TARGET=26.0 cargo test                      # 35/35 lib + 2 ax-keyboard
+MACOSX_DEPLOYMENT_TARGET=26.0 cargo test                      # 37/37 lib + 2 ax-keyboard
 MACOSX_DEPLOYMENT_TARGET=26.0 cargo build --bin ax-probe --bin ax-keyboard
 
 # native (owner host): harness from spike branch @ 0eb9a25
@@ -117,7 +117,7 @@ These results were produced **on the owner's host by the owner**, not independen
 - Host: ThinkPad X13 Yoga Gen 1 (Intel i5-10310U), macOS Tahoe 26.7.1 build 25G241, AX granted, OpenCore spoof `SystemProductName=MacBookPro16,2` (a spoof is not device identity).
 - `select`/`move`/`resize`/`raise` PASS (frame persisted); invalid geometry rejected **without changing the fixture** (exit 1); no-token exit 5; stale exit 4.
 - **Permission-denied: runtime-tested 2026-10-23** via an AX-untrusted launchd user-domain job — exit 3 with `error: permission denied (Accessibility not granted)`; see the section below. Success on normal operations never proved behavior on failure; this run closes that gap in one context.
-- Rust checks (separate): fmt OK, clippy clean, 35/35 platform-macos (+2 `ax-keyboard`), 23/23 workspace.
+- Rust checks (separate): fmt OK, clippy clean, 37/37 platform-macos (+2 `ax-keyboard`), 23/23 workspace.
 
 **Read-only multi-window probe (2 & 3 self-owned fixture windows): PASS, repeatable.**
 - `AXWindows` per PID ✓; `AXUIElementGetPid` match per element ✓; `AXPosition`/`AXSize` read-back finite/positive ✓; `AXUIElementIsAttributeSettable` recorded ✓ (`AXPosition=true`, `AXSize=false`).
@@ -129,7 +129,7 @@ These results were produced **on the owner's host by the owner**, not independen
 - `ax-probe windows <pid>` enumerated **two self-owned `HYPR-SPIKE-TARGET` windows in one process** and gave each a distinct runtime key; `ax-probe apply --display 0 24 1920 1056` computed a master-stack plan (master = the focused window), mapped planner `WindowId`s to native keys, applied both targets, `rollback_all_restored=true`, exit 0, verified by read-back; a second run was idempotent.
 - `ax-probe batch --plan` applied explicit frames; a plan naming an unobserved key failed closed (`UnknownTarget`) with **no writes**.
 - Coordinate convention recorded: AX frames use a **top-left origin**, so the caller-supplied work area must exclude the menu bar. `0 0 1920 1080` placed a window under the menu bar, macOS clamped it, the read-back mismatched (y 12→30) and the batch rolled back with `rollback_all_restored=true` — the rollback path verified.
-- Rust: fmt OK, clippy clean, 35/35 platform-macos (+2 `ax-keyboard`), 23/23 workspace.
+- Rust: fmt OK, clippy clean, 37/37 platform-macos (+2 `ax-keyboard`), 23/23 workspace.
 
 **Path D — minimal macOS menu-bar shell (macOS, host 2026-10-24): PASS.**
 - `ax-shell` (Rust `NSStatusItem`, no new dependencies) created a status item and a 10-item menu read back through AppKit: status line, `Reflow: master-stack`, `Reflow: columns`, `Pause`, Accessibility status, `Diagnostics`, `Quit`.
@@ -142,13 +142,19 @@ These results were produced **on the owner's host by the owner**, not independen
 - `~/.hypr-rust/config.json` (flat JSON, no dependencies): `version`, `layout`, `outer_gap`, `inner_gap`, `master_ratio`, `auto_tiling` (default `false`), `include_dialogs`; must be a regular non-symlink owner-only `0600` file, enforced on load and on write (temp + rename). Wrong value types, out-of-range numbers and unknown layouts/versions are rejected; unknown keys are ignored.
 - A `columns` config (gaps 20/4, ratio 0.6) made the menu read back `Reflow: columns` / `settings: layout=columns gaps=20/4 ratio=0.6 auto-tiling=off dialogs=out` and the reflow placed the two fixture windows at `(20,50,938,1010)` / `(962,50,938,1010)` — the exact work-area-minus-gaps arithmetic. A `0644` config failed closed with the `0600` message and fell back to defaults; `ax-shell --reset-defaults` wrote the defaults back as `0600` and a master-stack reflow reproduced `(12,42,1038,1026)` / `(1058,42,850,1026)`.
 - `auto_tiling` exists as the explicit opt-in switch only; no automatic tiling is implemented and nothing is applied without a user reflow command.
-- Rust: fmt OK, clippy clean, 35/35 platform-macos (+2 `ax-keyboard`), 23/23 workspace.
+- Rust: fmt OK, clippy clean, 37/37 platform-macos (+2 `ax-keyboard`), 23/23 workspace.
 
 **Path F — per-window subrole classification + mandatory gate wiring (macOS, host 2026-10-24): PASS.**
 - Enumeration reads `AXSubrole` and classifies every window before the plan: own pid → `OwnApplication` (mandatory, planner excludes unconditionally); dialog/floating subroles → `Dialog` (policy); notification subroles → `System`; `AXStandardWindow`/missing/unknown → `Application`. Runtime-observed on Tahoe 26.7.1: floating utility `NSPanel` → `AXSystemFloatingWindow`, plain `NSWindow` → `AXStandardWindow`.
 - `ax-probe windows` reports `role=` per key (no titles). Default reflow with a `--dialog` fixture: `applied 2 window(s), 1 excluded`, dialog frame unchanged `(1350,465,320,224)`.
 - With `include_dialogs=true` the plan covered the dialog, the floating panel **rejected the size write** (AX `-25200`) and the verified rollback restored its exact frame — the write-time gate rules, per the M3 review; the batch reported the failure honestly instead of a partial state.
-- Rust: fmt OK, clippy clean, 35/35 platform-macos (+2 `ax-keyboard`), 23/23 workspace.
+- Rust: fmt OK, clippy clean, 37/37 platform-macos (+2 `ax-keyboard`), 23/23 workspace.
+
+**Path G — settings panel over the config file (macOS, host 2026-10-24): PASS.**
+- `Settings…` menu action opens an `NSWindow` panel (popup + 3 fields + 2 switches + Save/Close) built on AppKit through the existing FFI (no new dependencies). Controls populate from the effective config on every open and read back exactly on host.
+- Save renders the flat JSON and runs `Config::from_json` — the same validation path as a file load — then writes atomically `0600`. A programmatic custom entry reached disk as `Columns 20/4 ratio 0.7 dialogs=true`; `master_ratio 5` was refused (`config value out of range: master_ratio`) without touching the file; defaults restored afterwards.
+- Auto-tiling stays an explicit opt-in switch, off by default; nothing automatic runs.
+- Rust: fmt OK, clippy clean, 37/37 platform-macos (+2 `ax-keyboard`), 23/23 workspace.
 
 **Permission-denied native run (2026-10-23, owner host): PASS.**
 - Context: a one-shot **launchd user-domain** job (`label com.hyprtest.ax-denied-check`, `RunAtLoad`, `/bin/sh` wrapper) ran the read-only `ax-probe frame 1`; the job's responsible process itself holds no Accessibility grant. No sudo, no TCC database change, no system settings or Remote Login change; the job was removed (`launchctl bootout`) immediately after and is not part of any repo.

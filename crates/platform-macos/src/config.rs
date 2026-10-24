@@ -86,6 +86,13 @@ pub fn config_path() -> Result<PathBuf, ConfigError> {
 }
 
 impl Config {
+    /// Parse and validate a config body through the same rules as the file.
+    /// The settings panel reuses this so the UI cannot diverge from what
+    /// `load()` accepts.
+    pub fn from_json(body: &str) -> Result<Config, ConfigError> {
+        parse_config(body)
+    }
+
     /// Load and validate the config. `Missing` means "use defaults"; the other
     /// errors are surfaced to the user rather than silently ignored.
     pub fn load() -> Result<Config, ConfigError> {
@@ -182,25 +189,29 @@ fn set_owner_only(path: &std::path::Path) -> Result<(), ConfigError> {
         .map_err(|_| ConfigError::Write)
 }
 
+/// The single name <-> kind table: the file format, the parser and the
+/// settings-panel popup all draw from this list, in this order.
+pub const LAYOUT_KINDS: [(&str, LayoutKind); 5] = [
+    ("bsp", LayoutKind::Bsp),
+    ("master-stack", LayoutKind::MasterStack),
+    ("monocle", LayoutKind::Monocle),
+    ("columns", LayoutKind::Columns),
+    ("rows", LayoutKind::Rows),
+];
+
 fn layout_kind_name(kind: LayoutKind) -> &'static str {
-    match kind {
-        LayoutKind::Bsp => "bsp",
-        LayoutKind::MasterStack => "master-stack",
-        LayoutKind::Monocle => "monocle",
-        LayoutKind::Columns => "columns",
-        LayoutKind::Rows => "rows",
-    }
+    LAYOUT_KINDS
+        .iter()
+        .find(|(_, mapped)| *mapped == kind)
+        .map(|(name, _)| *name)
+        .expect("every LayoutKind has a name in LAYOUT_KINDS")
 }
 
 fn parse_kind(text: &str) -> Option<LayoutKind> {
-    match text {
-        "bsp" => Some(LayoutKind::Bsp),
-        "master-stack" => Some(LayoutKind::MasterStack),
-        "monocle" => Some(LayoutKind::Monocle),
-        "columns" => Some(LayoutKind::Columns),
-        "rows" => Some(LayoutKind::Rows),
-        _ => None,
-    }
+    LAYOUT_KINDS
+        .iter()
+        .find(|(name, _)| *name == text)
+        .map(|(_, kind)| *kind)
 }
 
 /// Parse the flat config object. Unknown keys are ignored so a newer config can
@@ -454,6 +465,34 @@ mod tests {
         assert_eq!(
             parse_config(r#"{"version": 1, "outer_gap": true}"#),
             Err(ConfigError::Invalid("outer_gap"))
+        );
+    }
+
+    #[test]
+    fn layout_name_table_is_consistent() {
+        for (name, kind) in LAYOUT_KINDS {
+            assert_eq!(layout_kind_name(kind), name);
+            assert_eq!(parse_kind(name), Some(kind));
+        }
+        assert_eq!(LAYOUT_KINDS.len(), 5);
+        assert_eq!(parse_kind("not-a-layout"), None);
+    }
+
+    #[test]
+    fn from_json_matches_parse_config() {
+        assert_eq!(
+            Config::from_json(r#"{"version": 1, "layout": "columns"}"#),
+            parse_config(r#"{"version": 1, "layout": "columns"}"#)
+        );
+        let config = Config::from_json(
+            r#"{"version": 1, "outer_gap": 20, "inner_gap": 4, "master_ratio": 0.6}"#,
+        )
+        .unwrap();
+        assert_eq!(config.layout.outer_gap, 20.0);
+        assert_eq!(config.layout.master_ratio, 0.6);
+        assert_eq!(
+            Config::from_json(r#"{"version": 1, "master_ratio": 9}"#),
+            Err(ConfigError::Invalid("master_ratio"))
         );
     }
 
