@@ -365,7 +365,15 @@ fn parse_rules(value: &Value) -> Result<Vec<WindowRule>, ConfigError> {
                 }
                 "pid" => {
                     let number = as_number(value, "rules")?;
-                    if !number.is_finite() || number < 0.0 || number.fract() != 0.0 {
+                    // `as u32` saturates on overflow, so an unchecked cast
+                    // would silently rewrite a huge pid into u32::MAX;
+                    // reject out-of-range values instead. u32::MAX is exact
+                    // in f64, so the boundary is exact.
+                    if !number.is_finite()
+                        || number < 0.0
+                        || number.fract() != 0.0
+                        || number > u32::MAX as f64
+                    {
                         return Err(ConfigError::Invalid("rules"));
                     }
                     rule.pid = Some(number as u32);
@@ -780,6 +788,32 @@ mod tests {
         assert_eq!(
             two,
             r#"[{"bundle": "com.a.b", "dialogs": "exclude"},{"pid": 9, "dialogs": "default"}]"#
+        );
+    }
+
+    #[test]
+    fn pid_rejects_values_above_the_u32_range() {
+        // The boundary itself is accepted (u32::MAX is exact in f64).
+        let config =
+            parse_config(r#"{"version": 1, "rules": [{"pid": 4294967295, "dialogs": "default"}]}"#)
+                .unwrap();
+        assert_eq!(config.rules[0].pid, Some(4294967295));
+
+        // Above the range: a float-to-int cast would saturate silently, so
+        // these must be errors, on both the file path and the editor path.
+        for text in [
+            r#"{"version": 1, "rules": [{"pid": 4294967296, "dialogs": "default"}]}"#,
+            r#"{"version": 1, "rules": [{"pid": 10000000000, "dialogs": "default"}]}"#,
+            r#"{"version": 1, "rules": [{"pid": 1e300, "dialogs": "default"}]}"#,
+        ] {
+            assert_eq!(
+                parse_config(text).unwrap_err(),
+                ConfigError::Invalid("rules")
+            );
+        }
+        assert_eq!(
+            parse_rules_text(r#"[{"pid": 4294967296, "dialogs": "include"}]"#).unwrap_err(),
+            ConfigError::Invalid("rules")
         );
     }
 

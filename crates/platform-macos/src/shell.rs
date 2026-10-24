@@ -1245,6 +1245,11 @@ unsafe fn menu_titles(menu: Id) -> Vec<String> {
 /// Objects created here live for the process, which exits right after.
 pub fn self_test() {
     unsafe {
+        // The self-test rewrites the config many times; grab the pre-run
+        // file first so the run can restore what was there instead of
+        // leaving the profile on defaults.
+        let initial = Config::load().ok();
+
         // AppKit requires an autorelease pool on the thread that creates
         // autoreleased objects.
         let pool = msg0(class("NSAutoreleasePool"), sel("new"));
@@ -1423,14 +1428,34 @@ pub fn self_test() {
                 "self-test: loaded after broken rules = {:?}",
                 Config::load().map(|config| config.rules)
             ));
-            // 5) Restore defaults so later runs start clean.
+            // 5) Final exercise of the reset action's own code path.
             action_reset_defaults(std::ptr::null(), std::ptr::null());
             append_log(&format!(
                 "self-test: final settings status = {}",
                 STATE.lock().unwrap().status.clone()
             ));
-            // 6) Diagnostics through the action's own body (no mouse click):
-            // one structured line into the shell log.
+            // 6) Then restore what the run started with, so the self-test is
+            // transparent to a real profile; a run that started without a
+            // valid file stays on plain defaults.
+            match initial {
+                Some(config) => match config.save() {
+                    Ok(()) => {
+                        // The file is restored; adopt it in memory too, so
+                        // the status line and the after-run diagnostics
+                        // report exactly what is on disk.
+                        STATE.lock().unwrap().config = Some(config);
+                        set_status("config restored to its pre-run state");
+                        append_log("self-test: config restored to its pre-run state");
+                    }
+                    Err(error) => append_log(&format!("self-test: config restore failed: {error}")),
+                },
+                None => {
+                    append_log(
+                        "self-test: pre-run config unavailable (missing or invalid); left at defaults",
+                    );
+                }
+            }
+            // 7) Diagnostics after restore: must match the file now on disk.
             action_diagnostics(std::ptr::null(), std::ptr::null());
         }
         msg_void(pool, sel("drain"));
