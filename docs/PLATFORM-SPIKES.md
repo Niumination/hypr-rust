@@ -72,6 +72,14 @@ Devices/windows carries a role the planner's exclusion logic consumes: `OwnAppli
 - Restored `include_dialogs=false` re-run was idempotent (`applied 2 window(s), 1 excluded`).
 - Rust checks: fmt OK, clippy `-D warnings` clean; platform-macos lib **35/35** (+2 `ax-keyboard`) with classification/wiring unit tests; workspace **23/23**.
 
+### Spike 1 addendum — settings panel (recorded result)
+
+The menu grew a `Settings…` action opening a small `NSWindow` panel (`NSPopUpButton` for the layout kind, three `NSTextField`s for the gaps and ratio, two `NSButton` switches for auto-tiling (explicit opt-in, defaults off) and dialog inclusion, `Save`/`Close`). Every open re-populates the controls from the effective config. `Save` reads the controls, renders the same flat JSON, and runs it through `Config::from_json` — the identical validation path a file load uses — then writes it atomically (`0600`); a rejected value never touches the file. No new dependencies; all AppKit calls stay in `shell.rs`/`ffi.rs` (`initWithContentRect:styleMask:backing:defer:` did **not** raise an exception on this build, unlike `NSMenuItem initWithTitle:action:keyEquivalent:` did previously).
+
+**Host run (2026-10-24, owner host, self-owned fixture, `ax-shell --self-test`):** the panel opened and the controls read back exactly (`visible=1 popup=master-stack outer=12 inner=8 ratio=0.55 auto=false dialogs=false`); a programmatic custom entry (`columns`, gaps 20/4, ratio 0.7, dialogs in) went through the Save button's own code path and a re-load showed `Config { kind: Columns, 20/4, ratio 0.7, include_dialogs: true }` on disk; entering `master_ratio 5` was refused with `settings invalid: config value out of range: master_ratio` and the file was left untouched; `Reset to defaults` then restored the default config (`0600`). Menu read-back lists `Settings…` between the settings summary and `Reset to defaults`. Rust checks: fmt OK, clippy `-D warnings` clean, lib **37/37** (+2 `ax-keyboard`), workspace **23/23**.
+
+**Not done:** the panel edits the config file only — hot-reload of a reflow's dialog policy is per command, there are no per-window/user rules UI yet, no hotkeys, no signed bundle.
+
 ## Spike 2 — native workspace contract (conditional feature gate)
 
 Required set—test each operation independently, then as an end-to-end workflow:

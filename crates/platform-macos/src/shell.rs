@@ -71,6 +71,15 @@ objc_msg!(msg_id(a: Id));
 objc_msg!(msg_bool(a: bool));
 objc_msg!(msg_int(a: isize));
 objc_msg!(msg_cgfloat(a: CGFloat));
+objc_msg!(msg_i32(a: i32));
+objc_msg!(msg_view_init(rect: ffi::CGRect));
+objc_msg!(msg_popup_init(rect: ffi::CGRect, pulls_down: bool));
+objc_msg!(msg_window_init(
+    rect: ffi::CGRect,
+    style_mask: isize,
+    backing: i32,
+    defer_flag: u8
+));
 
 /// Send an Objective-C message with a non-object return type.
 ///
@@ -87,6 +96,7 @@ macro_rules! objc_msg_ret {
 }
 
 objc_msg_ret!(msg_isize() -> isize);
+objc_msg_ret!(msg_u8() -> u8);
 objc_msg_ret!(msg_cstr() -> *const c_char);
 
 /// Send a message with no arguments.
@@ -141,6 +151,52 @@ unsafe fn nsstring(text: &str) -> Id {
 
 // MARK: - Shell state and actions
 
+/// Handles for the settings panel's AppKit objects (built once, kept for the
+/// session, main-thread only — same lifetime rationale as the menu).
+#[derive(Clone, Copy)]
+struct SettingsPanel {
+    window: Handle,
+    popup: Handle,
+    outer: Handle,
+    inner: Handle,
+    ratio: Handle,
+    auto_tiling: Handle,
+    dialogs: Handle,
+}
+
+// Field layout inside the panel content view (content coordinates, origin at
+// the bottom-left; the title bar sits above).
+const K_SETTINGS_RECTS: [(f64, f64, f64, f64); 13] = [
+    (16.0, 168.0, 88.0, 20.0),   // label "Layout"
+    (110.0, 164.0, 150.0, 24.0), // popup
+    (16.0, 136.0, 88.0, 20.0),   // label "Outer gap"
+    (110.0, 134.0, 70.0, 20.0),  // outer field
+    (16.0, 104.0, 88.0, 20.0),   // label "Inner gap"
+    (110.0, 102.0, 70.0, 20.0),  // inner field
+    (16.0, 72.0, 88.0, 20.0),    // label "Master ratio"
+    (110.0, 70.0, 70.0, 20.0),   // ratio field
+    (16.0, 44.0, 100.0, 18.0),   // checkbox "Auto-tiling"
+    (120.0, 44.0, 140.0, 18.0),  // checkbox "Include dialogs"
+    (110.0, 10.0, 70.0, 22.0),   // Save
+    (190.0, 10.0, 70.0, 22.0),   // Close
+    (200.0, 168.0, 120.0, 20.0), // label "changes on Save"
+];
+
+/// Handle kinds for [`create_settings_panel`].
+const K_SETTINGS_WINDOW_W: CGFloat = 340.0;
+const K_SETTINGS_WINDOW_H: CGFloat = 210.0;
+
+/// `NSWindowStyleMask.titled | closable | miniaturizable`.
+const K_SETTINGS_STYLE_MASK: isize = 1 | 2 | 4;
+/// `NSBackingStoreBuffered` (a C enum, passed as an `int`).
+const K_BACKING_BUFFERED: i32 = 2;
+/// `NSButtonTypeSwitch` (checkbox; a C enum, passed as an `int`).
+const K_BUTTON_TYPE_SWITCH: i32 = 3;
+/// `NSButtonTypeMomentaryPushIn` (regular button).
+const K_BUTTON_TYPE_PUSH: i32 = 0;
+/// `NSControlStateValueOn`.
+const K_STATE_ON: isize = 1;
+
 /// Shell state shared with the Objective-C action callbacks. Menu actions run
 /// on the main thread, so a plain `Mutex` is enough.
 struct ShellState {
@@ -149,6 +205,7 @@ struct ShellState {
     status_item: Handle,
     target: Handle,
     config: Option<Config>,
+    settings: Option<SettingsPanel>,
     status: String,
 }
 
@@ -158,6 +215,7 @@ static STATE: Mutex<ShellState> = Mutex::new(ShellState {
     status_item: Handle::null(),
     target: Handle::null(),
     config: None,
+    settings: None,
     status: String::new(),
 });
 
@@ -197,6 +255,91 @@ extern "C" fn action_reset_defaults(_this: Id, _cmd: Sel) {
         Ok(()) => set_status("settings reset to defaults"),
         Err(error) => set_status(&format!("reset failed: {error}")),
     }
+    refresh_menu();
+}
+
+/// Settings implementations shared with the self-test: the selector bodies
+/// below call these, so programmatic self-test input exercises the same code
+/// path minus the Objective-C dispatch.
+fn save_settings_from_panel() {
+    let panel = {
+        let state = STATE.lock().unwrap();
+        match state.settings {
+            Some(ref settings) => *settings,
+            None => return,
+        }
+    };
+    // SAFETY: the panel handles are live AppKit objects on the main thread.
+    let body = unsafe {
+        let popup = popup_title(panel.popup);
+        let outer = field_text(panel.outer);
+        let inner = field_text(panel.inner);
+        let ratio = field_text(panel.ratio);
+        let auto = checkbox_on(panel.auto_tiling);
+        let dialogs = checkbox_on(panel.dialogs);
+        settings_body(
+            popup.as_deref().unwrap_or(""),
+            &outer,
+            &inner,
+            &ratio,
+            auto,
+            dialogs,
+        )
+    };
+    match Config::from_json(&body) {
+        Ok(config) => match config.save() {
+            Ok(()) => {
+                STATE.lock().unwrap().config = Some(config);
+                set_status("settings saved");
+            }
+            Err(error) => set_status(&format!("settings save failed: {error}")),
+        },
+        Err(error) => {
+            set_status(&format!("settings invalid: {error}"));
+        }
+    }
+    refresh_menu();
+}
+
+/// Open (and on first use build) the settings panel, populated from the
+/// effective config.
+fn show_settings() {
+    let mut state = STATE.lock().unwrap();
+    if state.settings.is_none() {
+        let target = state.target.0;
+        // SAFETY: main thread; the app and the action target are live.
+        state.settings = Some(unsafe { create_settings_panel(target) });
+    }
+    let panel = state.settings.unwrap();
+    let config = state.config.clone().unwrap_or_default();
+    let app = state.app;
+    // SAFETY: main-thread calls on live handles; populate before showing.
+    unsafe {
+        populate_settings(panel, &config);
+        if !app.is_null() {
+            msg_bool(app.0, sel("activateIgnoringOtherApps:"), true);
+        }
+        msg_void(panel.window.0, sel("makeKeyAndOrderFront:"));
+    }
+}
+
+extern "C" fn action_show_settings(_this: Id, _cmd: Sel) {
+    show_settings();
+}
+
+extern "C" fn action_save_settings(_this: Id, _cmd: Sel) {
+    save_settings_from_panel();
+}
+
+extern "C" fn action_close_settings(_this: Id, _cmd: Sel) {
+    // SAFETY: hides a live window without closing the app.
+    let window = {
+        let state = STATE.lock().unwrap();
+        state.settings.map(|panel| panel.window)
+    };
+    if let Some(window) = window {
+        unsafe { msg_void_id(window.0, sel("orderOut:"), std::ptr::null()) };
+    }
 }
 
 extern "C" fn action_diagnostics(_this: Id, _cmd: Sel) {
@@ -209,6 +352,316 @@ extern "C" fn action_quit(_this: Id, _cmd: Sel) {
     if !app.is_null() {
         // SAFETY: `app` is the live NSApplication instance.
         unsafe { msg_void_id(app.0, sel("terminate:"), std::ptr::null()) };
+    }
+}
+
+fn settings_body(
+    layout: &str,
+    outer: &str,
+    inner: &str,
+    ratio: &str,
+    auto_tiling: bool,
+    include_dialogs: bool,
+) -> String {
+    // The layout name is embedded only when it is a known kind (otherwise an
+    // empty string, which the parser rejects), and number text only when it
+    // consists of number characters (otherwise `null`, rejected as unparseable).
+    // Nothing in this path is attacker-relevant anyway — the panel edits the
+    // user's own local file — but this keeps the JSON well-formed for arbitrary
+    // typing and puts every final value through the same validation as a file
+    // load.
+    let layout = if layout_kind_name_lookup(layout).is_some() {
+        layout
+    } else {
+        ""
+    };
+    format!(
+        "{{\n  \"version\": {},\n  \"layout\": \"{layout}\",\n  \"outer_gap\": {},\n  \"inner_gap\": {},\n  \"master_ratio\": {},\n  \"auto_tiling\": {},\n  \"include_dialogs\": {}\n}}\n",
+        crate::config::CONFIG_VERSION,
+        number_text(outer),
+        number_text(inner),
+        number_text(ratio),
+        auto_tiling,
+        include_dialogs,
+    )
+}
+
+fn layout_kind_name_lookup(text: &str) -> Option<layout_core::LayoutKind> {
+    crate::config::LAYOUT_KINDS
+        .iter()
+        .find(|(name, _)| *name == text)
+        .map(|(_, kind)| *kind)
+}
+
+/// A number will only be written where the characters are unambiguous
+/// number characters; anything else becomes `null`, which the parser rejects.
+fn number_text(text: &str) -> String {
+    let clean = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'));
+    if clean {
+        text.to_string()
+    } else {
+        "null".to_string()
+    }
+}
+
+// MARK: - Settings panel (AppKit)
+
+/// Text of an editable field.
+///
+/// SAFETY: `field` must be a live NSTextField.
+unsafe fn field_text(field: Handle) -> String {
+    let value = unsafe { msg0(field.0, sel("stringValue")) };
+    unsafe { utf8_string(value) }
+}
+
+/// Title of the popup's selected item, or `None` when nothing is selected.
+///
+/// SAFETY: `popup` must be a live NSPopUpButton.
+unsafe fn popup_title(popup: Handle) -> Option<String> {
+    let value = unsafe { msg0(popup.0, sel("titleOfSelectedItem")) };
+    if value.is_null() {
+        None
+    } else {
+        Some(unsafe { utf8_string(value) })
+    }
+}
+
+/// On/off state of a checkbox.
+///
+/// SAFETY: `button` must be a live NSButton (switch type).
+unsafe fn checkbox_on(button: Handle) -> bool {
+    unsafe { msg_isize(button.0, sel("state")) == K_STATE_ON }
+}
+
+/// Set an editable field.
+///
+/// SAFETY: `field` must be a live NSTextField.
+unsafe fn set_field_text(field: Handle, text: &str) {
+    unsafe { msg_void_id(field.0, sel("setStringValue:"), nsstring(text)) };
+}
+
+/// Select a popup item by title (no-op for unknown titles).
+///
+/// SAFETY: `popup` must be a live NSPopUpButton and the title must exist.
+unsafe fn select_popup_title(popup: Handle, title: &str) {
+    unsafe {
+        msg_void_id(popup.0, sel("selectItemWithTitle:"), nsstring(title));
+    }
+}
+
+/// Set a checkbox state.
+///
+/// SAFETY: `button` must be a live NSButton (switch type).
+unsafe fn set_checkbox(button: Handle, on: bool) {
+    unsafe { msg_int(button.0, sel("setState:"), i64::from(on) as isize) };
+}
+
+/// Turn an NSString into a Rust string.
+///
+/// SAFETY: `value` must be a live NSString (or null; yields an empty string).
+unsafe fn utf8_string(value: Id) -> String {
+    if value.is_null() {
+        return String::new();
+    }
+    let bytes = unsafe { msg_cstr(value, sel("UTF8String")) };
+    if bytes.is_null() {
+        return String::new();
+    }
+    // SAFETY: bytes is a NUL-terminated UTF-8 buffer owned by the string.
+    unsafe { std::ffi::CStr::from_ptr(bytes) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Populate the panel from `config`.
+///
+/// SAFETY: the panel handles must be live AppKit objects.
+unsafe fn populate_settings(panel: SettingsPanel, config: &Config) {
+    unsafe {
+        select_popup_title(panel.popup, config.kind_name());
+        set_field_text(panel.outer, &fmt_num(config.layout.outer_gap));
+        set_field_text(panel.inner, &fmt_num(config.layout.inner_gap));
+        set_field_text(panel.ratio, &fmt_num(config.layout.master_ratio));
+        set_checkbox(panel.auto_tiling, config.auto_tiling);
+        set_checkbox(panel.dialogs, config.include_dialogs);
+    }
+}
+
+/// Build the settings window once.
+///
+/// SAFETY: main-thread only, after the NSApplication exists; the returned
+/// handles are kept for the session in `ShellState.settings`.
+unsafe fn create_settings_panel(target: Id) -> SettingsPanel {
+    // SAFETY: documented class initialisers; window retains its subviews.
+    let window = unsafe {
+        let alloc = msg0(class("NSWindow"), sel("alloc"));
+        msg_window_init(
+            alloc,
+            sel("initWithContentRect:styleMask:backing:defer:"),
+            ffi::CGRect {
+                origin: ffi::CGPoint { x: 300.0, y: 340.0 },
+                size: ffi::CGSize {
+                    width: K_SETTINGS_WINDOW_W,
+                    height: K_SETTINGS_WINDOW_H,
+                },
+            },
+            K_SETTINGS_STYLE_MASK,
+            K_BACKING_BUFFERED,
+            0,
+        )
+    };
+    assert!(!window.is_null(), "settings window unavailable");
+    let content = unsafe { msg0(window, sel("contentView")) };
+    assert!(!content.is_null(), "settings content view unavailable");
+    unsafe {
+        msg_void_id(window, sel("setTitle:"), nsstring("Hypr-Rust settings"));
+        msg_bool(window, sel("setReleasedWhenClosed:"), false);
+
+        // Layout picker.
+        let popup = {
+            let alloc = msg0(class("NSPopUpButton"), sel("alloc"));
+            msg_popup_init(
+                alloc,
+                sel("initWithFrame:pullsDown:"),
+                rect(K_SETTINGS_RECTS[1]),
+                false,
+            )
+        };
+        for (name, _) in crate::config::LAYOUT_KINDS {
+            msg_void_id(popup, sel("addItemWithTitle:"), nsstring(name));
+        }
+        msg_void_id(content, sel("addSubview:"), popup);
+
+        let outer = make_field(content, K_SETTINGS_RECTS[3]);
+        let inner = make_field(content, K_SETTINGS_RECTS[5]);
+        let ratio = make_field(content, K_SETTINGS_RECTS[7]);
+
+        let auto_tiling = make_checkbox(content, K_SETTINGS_RECTS[8], "Auto-tiling");
+        let dialogs = make_checkbox(content, K_SETTINGS_RECTS[9], "Include dialogs");
+
+        // Labels.
+        make_label(content, K_SETTINGS_RECTS[0], "Layout");
+        make_label(content, K_SETTINGS_RECTS[2], "Outer gap");
+        make_label(content, K_SETTINGS_RECTS[4], "Inner gap");
+        make_label(content, K_SETTINGS_RECTS[6], "Master ratio");
+        make_label(content, K_SETTINGS_RECTS[12], "changes on Save");
+
+        // Save / Close: the window retains them; the actions live on `target`.
+        let _save = make_button(
+            content,
+            K_SETTINGS_RECTS[10],
+            "Save",
+            target,
+            "saveSettings:",
+        );
+        let _close = make_button(
+            content,
+            K_SETTINGS_RECTS[11],
+            "Close",
+            target,
+            "closeSettings:",
+        );
+
+        SettingsPanel {
+            window: Handle(window),
+            popup: Handle(popup),
+            outer,
+            inner,
+            ratio,
+            auto_tiling,
+            dialogs,
+        }
+    }
+}
+
+/// A text-field rectangle literal.
+fn rect(item: (f64, f64, f64, f64)) -> ffi::CGRect {
+    ffi::CGRect {
+        origin: ffi::CGPoint {
+            x: item.0,
+            y: item.1,
+        },
+        size: ffi::CGSize {
+            width: item.2,
+            height: item.3,
+        },
+    }
+}
+
+/// Allocate/initialize an editable text field and add it to `content`.
+///
+/// SAFETY: main thread; `content` must be a live view.
+unsafe fn make_field(content: Id, place: (f64, f64, f64, f64)) -> Handle {
+    // SAFETY: documented initialisers.
+    let field = unsafe {
+        let alloc = msg0(class("NSTextField"), sel("alloc"));
+        msg_view_init(alloc, sel("initWithFrame:"), rect(place))
+    };
+    unsafe { msg_void_id(content, sel("addSubview:"), field) };
+    Handle(field)
+}
+
+/// Allocate/initialize a checkbox.
+///
+/// SAFETY: main thread; `content` must be a live view.
+unsafe fn make_checkbox(content: Id, place: (f64, f64, f64, f64), title: &str) -> Handle {
+    // SAFETY: documented initialisers; NSButtonTypeSwitch is the checkbox type.
+    let button = unsafe {
+        let alloc = msg0(class("NSButton"), sel("alloc"));
+        let button = msg_view_init(alloc, sel("initWithFrame:"), rect(place));
+        msg_i32(button, sel("setButtonType:"), K_BUTTON_TYPE_SWITCH);
+        msg_void_id(button, sel("setTitle:"), nsstring(title));
+        button
+    };
+    unsafe { msg_void_id(content, sel("addSubview:"), button) };
+    Handle(button)
+}
+
+/// Allocate/initialize a push button bound to `action` on `target`.
+///
+/// SAFETY: main thread; `target` must be a live object whose class registered
+/// the selector.
+unsafe fn make_button(
+    content: Id,
+    place: (f64, f64, f64, f64),
+    title: &str,
+    target: Id,
+    action: &str,
+) -> Handle {
+    // SAFETY: documented initialisers; NSButtonTypeMomentaryPushIn is the
+    // standard push-button type.
+    let button = unsafe {
+        let alloc = msg0(class("NSButton"), sel("alloc"));
+        let button = msg_view_init(alloc, sel("initWithFrame:"), rect(place));
+        msg_i32(button, sel("setButtonType:"), K_BUTTON_TYPE_PUSH);
+        msg_void_id(button, sel("setTitle:"), nsstring(title));
+        msg_void_id(button, sel("setTarget:"), target);
+        msg_void_id(button, sel("setAction:"), sel(action) as Id);
+        button
+    };
+    unsafe { msg_void_id(content, sel("addSubview:"), button) };
+    Handle(button)
+}
+
+/// Allocate/initialize a static label.
+///
+/// SAFETY: main thread; `content` must be a live view.
+unsafe fn make_label(content: Id, place: (f64, f64, f64, f64), title: &str) {
+    // SAFETY: documented initialisers; disabling edit/border/background turns
+    // a plain text field into a label.
+    unsafe {
+        let label = {
+            let alloc = msg0(class("NSTextField"), sel("alloc"));
+            msg_view_init(alloc, sel("initWithFrame:"), rect(place))
+        };
+        msg_bool(label, sel("setEditable:"), false);
+        msg_bool(label, sel("setBordered:"), false);
+        msg_bool(label, sel("setDrawsBackground:"), false);
+        msg_void_id(label, sel("setStringValue:"), nsstring(title));
+        msg_void_id(content, sel("addSubview:"), label);
     }
 }
 
@@ -269,6 +722,7 @@ unsafe fn build_menu(target: Id) -> Id {
         add_action(menu, target, "Pause", "togglePause:");
         msg_void_id(menu, sel("addItem:"), separator());
         add_status(menu, &settings_line());
+        add_action(menu, target, "Settings\u{2026}", "showSettings:");
         add_action(menu, target, "Reset to defaults", "resetDefaults:");
         msg_void_id(menu, sel("addItem:"), separator());
         add_status(menu, &accessibility_line());
@@ -509,6 +963,24 @@ unsafe fn create_target() -> Id {
         );
         ffi::class_addMethod(
             cls,
+            sel("showSettings:"),
+            imp(action_show_settings),
+            types.as_ptr() as *const c_char,
+        );
+        ffi::class_addMethod(
+            cls,
+            sel("saveSettings:"),
+            imp(action_save_settings),
+            types.as_ptr() as *const c_char,
+        );
+        ffi::class_addMethod(
+            cls,
+            sel("closeSettings:"),
+            imp(action_close_settings),
+            types.as_ptr() as *const c_char,
+        );
+        ffi::class_addMethod(
+            cls,
             sel("resetDefaults:"),
             imp(action_reset_defaults),
             types.as_ptr() as *const c_char,
@@ -637,6 +1109,56 @@ pub fn self_test() {
         append_log(&format!("self-test: status = {}", status_line()));
         perform_reflow();
         append_log(&format!("self-test: after reflow = {}", status_line()));
+
+        // Settings panel: open through the same path the menu action uses,
+        // read the controls back, save custom values through the Save
+        // button's own helper, prove an invalid value is refused, then
+        // restore defaults for the next run.
+        show_settings();
+        {
+            let panel = STATE.lock().unwrap().settings.expect("panel built");
+            // SAFETY: within self_test's enclosing unsafe block; live handles.
+            let (popup, outer, inner, ratio) = (
+                popup_title(panel.popup),
+                field_text(panel.outer),
+                field_text(panel.inner),
+                field_text(panel.ratio),
+            );
+            let (auto, dialogs) = (checkbox_on(panel.auto_tiling), checkbox_on(panel.dialogs));
+            let visible = msg_u8(panel.window.0, sel("isVisible"));
+            append_log(&format!(
+                "self-test: panel visible={visible} popup={popup:?} outer={outer} inner={inner} ratio={ratio} auto={auto} dialogs={dialogs}"
+            ));
+            // 1) A valid custom value saved through the Save button's code path.
+            select_popup_title(panel.popup, "columns");
+            set_field_text(panel.outer, "20");
+            set_field_text(panel.inner, "4");
+            set_field_text(panel.ratio, "0.7");
+            set_checkbox(panel.dialogs, true);
+            save_settings_from_panel();
+            append_log(&format!(
+                "self-test: custom save status = {}",
+                STATE.lock().unwrap().status.clone()
+            ));
+            // The custom values must have landed on disk through Config::save.
+            append_log(&format!(
+                "self-test: loaded after custom save = {:?}",
+                Config::load()
+            ));
+            // 2) An invalid value is refused; the file stays untouched.
+            set_field_text(panel.ratio, "5");
+            save_settings_from_panel();
+            append_log(&format!(
+                "self-test: invalid save status = {}",
+                STATE.lock().unwrap().status.clone()
+            ));
+            // 3) Restore defaults so later runs start clean.
+            action_reset_defaults(std::ptr::null(), std::ptr::null());
+            append_log(&format!(
+                "self-test: final settings status = {}",
+                STATE.lock().unwrap().status.clone()
+            ));
+        }
         msg_void(pool, sel("drain"));
     }
 }
