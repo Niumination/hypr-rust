@@ -129,6 +129,18 @@ extern "C" {
     /// Compare two CF objects for equality. Safety: both must be live
     /// (non-null) CFTypeRefs.
     pub fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> Boolean;
+
+    /// Copy a CFString's bytes into a caller buffer. `size` is the buffer
+    /// capacity in bytes; the result is UTF-8 plus a terminating NUL.
+    /// Returns false when the buffer was too small or the string invalid.
+    /// Safety: `buffer` must be writable for `size` bytes and `string` must be
+    /// a live CFStringRef.
+    pub fn CFStringGetCString(
+        string: CFStringRef,
+        buffer: *mut c_char,
+        size: isize,
+        encoding: u32,
+    ) -> Boolean;
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]

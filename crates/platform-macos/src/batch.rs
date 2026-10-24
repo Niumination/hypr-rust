@@ -462,15 +462,23 @@ mod tests {
     #[test]
     fn targets_for_plan_maps_two_windows_of_one_process() {
         use crate::adapter::observation_from_windows;
-        use layout_core::{DisplayId, LayoutConfig, LayoutKind};
+        use layout_core::{DisplayId, LayoutConfig, LayoutKind, WindowRole};
 
         let display = Rect::new(0.0, 0.0, 1200.0, 800.0);
         // Keys 0 and 1 are two windows of the SAME process.
         let observation = observation_from_windows(
             display,
             &[
-                (WindowKey(0), Rect::new(10.0, 10.0, 200.0, 200.0)),
-                (WindowKey(1), Rect::new(220.0, 10.0, 200.0, 200.0)),
+                (
+                    WindowKey(0),
+                    Rect::new(10.0, 10.0, 200.0, 200.0),
+                    WindowRole::Application,
+                ),
+                (
+                    WindowKey(1),
+                    Rect::new(220.0, 10.0, 200.0, 200.0),
+                    WindowRole::Application,
+                ),
             ],
             Some(WindowKey(1)),
         );
@@ -492,11 +500,15 @@ mod tests {
     #[test]
     fn targets_for_plan_fails_closed_on_unmapped_id() {
         use crate::adapter::observation_from_windows;
-        use layout_core::{DisplayId, LayoutKind, LayoutPlan, Placement, WindowId};
+        use layout_core::{DisplayId, LayoutKind, LayoutPlan, Placement, WindowId, WindowRole};
 
         let observation = observation_from_windows(
             Rect::new(0.0, 0.0, 1200.0, 800.0),
-            &[(WindowKey(0), Rect::new(0.0, 0.0, 100.0, 100.0))],
+            &[(
+                WindowKey(0),
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                WindowRole::Application,
+            )],
             None,
         );
         let plan = LayoutPlan {

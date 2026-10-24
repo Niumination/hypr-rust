@@ -448,13 +448,22 @@ fn perform_reflow() {
         }
     };
     let result = batch::apply_batch(&set, &targets);
+    let excluded = plan.excluded.len();
     let status = if let Some(error) = &result.error {
         format!(
             "{label}: failed at key {:?} ({error})",
             result.failed_at.map(|key| key.0)
         )
     } else {
-        format!("{label}: applied {} window(s)", result.outcomes.len())
+        format!(
+            "{label}: applied {} window(s){}",
+            result.outcomes.len(),
+            if excluded > 0 {
+                format!(", {excluded} excluded")
+            } else {
+                String::new()
+            }
+        )
     };
     set_status(&status);
 }

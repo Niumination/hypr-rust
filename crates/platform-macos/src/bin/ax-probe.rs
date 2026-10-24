@@ -44,7 +44,7 @@ use hypr_rust_platform_macos::{
     batch::{self, BatchResult, PlanError, WindowOutcome},
     fixture, AxError, FixtureError, MacAxAdapter, MacWindowSet, WindowIdMap,
 };
-use layout_core::{DisplayId, LayoutConfig, LayoutKind, LayoutPlan, Rect};
+use layout_core::{DisplayId, LayoutConfig, LayoutKind, LayoutPlan, Rect, WindowRole};
 
 /// Probe-level errors: adapter failures plus the registration failure.
 enum ProbeError {
@@ -288,10 +288,28 @@ fn parse_plan_arg(args: &[String]) -> Result<PathBuf, ProbeError> {
 }
 
 /// Print the windows of a set: key and frame per window. No titles.
+/// Role name used by the printed output (lowercase, no titles pne).
+fn role_name(role: WindowRole) -> &'static str {
+    match role {
+        WindowRole::Application => "application",
+        WindowRole::Dialog => "dialog",
+        WindowRole::OwnApplication => "own-application",
+        WindowRole::System => "system",
+        WindowRole::Desktop => "desktop",
+    }
+}
+
+/// Print enumeration output: one line per window with runtime key, role and
+/// frame. Titles are never read or printed.
 fn print_windows(set: &MacWindowSet) {
     println!("windows={} pid={}", set.len(), set.pid());
-    for (key, rect) in set.entries() {
-        println!("  key={} frame={}", key.0, fmt_rect(&rect));
+    for (key, rect, role) in set.entries() {
+        println!(
+            "  key={} role={} frame={}",
+            key.0,
+            role_name(role),
+            fmt_rect(&rect)
+        );
     }
 }
 
