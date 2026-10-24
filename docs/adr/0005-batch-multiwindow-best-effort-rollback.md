@@ -37,6 +37,10 @@ The public Accessibility API exposes only per-element writes (`AXUIElementSetAtt
 - **Requiring a public all-or-nothing API:** no such API exists on the target; keeping the strict requirement blocks delivery indefinitely (ADR-0004).
 - **Private/undocumented APIs (SkyLight/CGS) for atomic batching:** rejected — public API only.
 
+## Addendum — owner acceptance of the residual risk (2026-10-24)
+
+The owner's standing acceptance for any multi-window mutation remains **strict no-partial**; this ADR's best-effort semantics do not satisfy that acceptance. After the host evidence in [`ARENA-VERIFICATION.md`](../ARENA-VERIFICATION.md) Paths F–H (a mid-batch write rejection produces a genuine cross-window partial that only per-window rollback can chase, and AX offers no prepare/commit transaction that could remove the residual race), the owner explicitly chose the **status quo**: the fixture-bound shell `Reflow:` path keeps these semantics unchanged. Binding conditions of that decision: the path is never advertised or documented as no-partial-compliant, every report labels batch outcomes as best-effort, the reserved-fixture boundary stays the only mutation surface, and any future productization (non-fixture targets, scheduled/auto application) requires a new decision. A preflight protocol (write-capability probes plus read-back) was evaluated and can only narrow the failure classes, not guarantee the constraint; the evidence label for any fixture rollback runs remains "upstream best-effort demonstrated", not acceptance.
+
 ## References
 
 - Superseded: [ADR-0004](./0004-batch-multiwindow-deferred-no-partial.md)

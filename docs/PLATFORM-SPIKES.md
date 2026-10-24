@@ -96,6 +96,14 @@ The menu grew a `Settings…` action opening a small `NSWindow` panel (`NSPopUpB
 
 **Not done:** no rules editor UI (rules are hand-written JSON; the panel shows their count only), no window-title matching (titles are never read anywhere in the shell), and a rule can never override the write gate or a mandatory exclusion.
 
+### Spike 1 addendum — settings-panel rules editor (recorded result)
+
+The settings panel grew a **rules editor**: a scrollable plain-text view (`NSScrollView` + `NSTextView`, plain-rich `setRichText:` off) holding the rules array. Every open populates it with the canonical JSON of the effective rules (`rules_json(&config.rules)`, `[]` when empty). `Save` first runs the typed text through `parse_rules_text` — the exact entry validation a config file load runs — and embeds only the **canonical regenerated** JSON into the body; raw editor text never reaches the save path, so a typed quote cannot break the JSON structure. A rules error refuses the whole save (`settings invalid: rules …`) without touching the file. With this, the panel save semantics changed from "preserve loaded rules" to "the editor is authoritative for rules" (populate runs on every open, so the on-disk state is what the editor shows at open).
+
+**Host run (2026-10-24, owner host, `--count 2 --dialog` fixture, `ax-shell --self-test`):** the editor read back the seeded rule canonically; a custom save round-tripped it; a typed pid rule (`{"pid": <pid>, "dialogs": "include"}`) replaced the seeded one and re-loaded exactly; broken text `[{"pid": 1` was refused with `settings invalid: rules (config is not valid JSON)` and the loaded file still held the pid rule; defaults restored. One host-found bug in this addendum's own code: a fictitious `setWidthTracking:` selector raised an ObjC exception that aborted the process at panel build (caught via `lldb` ObjC-exception breakpoint, RFE-free no-window-touch crash), fixed to the real `setWidthTracksTextView:` and re-verified end-to-end. Rust: fmt OK, clippy `-D warnings` clean, lib **45/45** (+2 `ax-keyboard`), workspace **27/27**.
+
+**Not done:** no checkbox-style rules UI and no per-rule row controls (the editor is JSON text over the validated shape), and rules still may only shift the ordinary-app dialog policy (mandatory exclusions and the write-time gate are unreachable through rules).
+
 ## Spike 2 — native workspace contract (conditional feature gate)
 
 Required set—test each operation independently, then as an end-to-end workflow:

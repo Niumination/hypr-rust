@@ -18,7 +18,9 @@ use layout_core::{DisplayId, PlatformSnapshot, Rect, WindowRole};
 
 use crate::adapter::MacAxAdapter;
 use crate::batch;
-use crate::config::{dialog_policy_for, Config, ConfigError, DialogPolicy, WindowRule};
+use crate::config::{
+    dialog_policy_for, parse_rules_text, rules_json, Config, ConfigError, DialogPolicy, WindowRule,
+};
 use crate::ffi::{self, CGFloat};
 use crate::{fixture, process_alive};
 
@@ -162,29 +164,34 @@ struct SettingsPanel {
     ratio: Handle,
     auto_tiling: Handle,
     dialogs: Handle,
+    rules: Handle,
 }
 
 // Field layout inside the panel content view (content coordinates, origin at
-// the bottom-left; the title bar sits above).
-const K_SETTINGS_RECTS: [(f64, f64, f64, f64); 13] = [
-    (16.0, 168.0, 88.0, 20.0),   // label "Layout"
-    (110.0, 164.0, 150.0, 24.0), // popup
-    (16.0, 136.0, 88.0, 20.0),   // label "Outer gap"
-    (110.0, 134.0, 70.0, 20.0),  // outer field
-    (16.0, 104.0, 88.0, 20.0),   // label "Inner gap"
-    (110.0, 102.0, 70.0, 20.0),  // inner field
-    (16.0, 72.0, 88.0, 20.0),    // label "Master ratio"
-    (110.0, 70.0, 70.0, 20.0),   // ratio field
-    (16.0, 44.0, 100.0, 18.0),   // checkbox "Auto-tiling"
-    (120.0, 44.0, 140.0, 18.0),  // checkbox "Include dialogs"
-    (110.0, 10.0, 70.0, 22.0),   // Save
-    (190.0, 10.0, 70.0, 22.0),   // Close
-    (200.0, 168.0, 120.0, 20.0), // label "changes on Save"
+// the bottom-left; the title bar sits above). The rules editor sits between
+// the ratio row and the checkboxes; Save saves what is on screen, rules from
+// the editor text.
+const K_SETTINGS_RECTS: [(f64, f64, f64, f64); 15] = [
+    (16.0, 292.0, 88.0, 20.0),   // label "Layout"
+    (110.0, 288.0, 150.0, 24.0), // popup
+    (16.0, 260.0, 88.0, 20.0),   // label "Outer gap"
+    (110.0, 258.0, 70.0, 20.0),  // outer field
+    (16.0, 228.0, 88.0, 20.0),   // label "Inner gap"
+    (110.0, 226.0, 70.0, 20.0),  // inner field
+    (16.0, 196.0, 88.0, 20.0),   // label "Master ratio"
+    (110.0, 194.0, 70.0, 20.0),  // ratio field
+    (16.0, 40.0, 100.0, 18.0),   // checkbox "Auto-tiling"
+    (120.0, 40.0, 140.0, 18.0),  // checkbox "Include dialogs"
+    (110.0, 8.0, 70.0, 22.0),    // Save
+    (190.0, 8.0, 70.0, 22.0),    // Close
+    (200.0, 292.0, 120.0, 20.0), // label "changes on Save"
+    (16.0, 170.0, 190.0, 18.0),  // label "Rules (JSON array)"
+    (16.0, 66.0, 308.0, 96.0),   // rules text view
 ];
 
 /// Handle kinds for [`create_settings_panel`].
 const K_SETTINGS_WINDOW_W: CGFloat = 340.0;
-const K_SETTINGS_WINDOW_H: CGFloat = 210.0;
+const K_SETTINGS_WINDOW_H: CGFloat = 330.0;
 
 /// `NSWindowStyleMask.titled | closable | miniaturizable`.
 const K_SETTINGS_STYLE_MASK: isize = 1 | 2 | 4;
@@ -276,35 +283,47 @@ fn save_settings_from_panel() {
         }
     };
     // SAFETY: the panel handles are live AppKit objects on the main thread.
-    let body = unsafe {
-        let popup = popup_title(panel.popup);
-        let outer = field_text(panel.outer);
-        let inner = field_text(panel.inner);
-        let ratio = field_text(panel.ratio);
-        let auto = checkbox_on(panel.auto_tiling);
-        let dialogs = checkbox_on(panel.dialogs);
-        settings_body(
-            popup.as_deref().unwrap_or(""),
-            &outer,
-            &inner,
-            &ratio,
-            auto,
-            dialogs,
+    let (popup, outer, inner, ratio, auto, dialogs, rules_text) = unsafe {
+        let rules_text = rules_view_text(panel.rules);
+        (
+            popup_title(panel.popup),
+            field_text(panel.outer),
+            field_text(panel.inner),
+            field_text(panel.ratio),
+            checkbox_on(panel.auto_tiling),
+            checkbox_on(panel.dialogs),
+            rules_text,
         )
     };
-    match Config::from_json(&body) {
-        Ok(mut config) => {
-            // The panel does not edit rules; keep the loaded ones so a panel
-            // save never silently erases a hand-written rules list.
-            config.rules = current_config().rules;
-            match config.save() {
-                Ok(()) => {
-                    STATE.lock().unwrap().config = Some(config);
-                    set_status("settings saved");
-                }
-                Err(error) => set_status(&format!("settings save failed: {error}")),
-            }
+    // The rules editor is authoritative for rules: the typed text must parse
+    // as a valid rules list (the same entry validation a file load runs), and
+    // only the canonical regenerated JSON is embedded — raw editor text never
+    // reaches the body, so a typed quote cannot break the JSON structure.
+    let rules = match parse_rules_text(&rules_text) {
+        Ok(rules) => rules,
+        Err(error) => {
+            set_status(&format!("settings invalid: rules ({error})"));
+            refresh_menu();
+            return;
         }
+    };
+    let body = settings_body(
+        popup.as_deref().unwrap_or(""),
+        &outer,
+        &inner,
+        &ratio,
+        auto,
+        dialogs,
+        &rules_json(&rules),
+    );
+    match Config::from_json(&body) {
+        Ok(config) => match config.save() {
+            Ok(()) => {
+                STATE.lock().unwrap().config = Some(config);
+                set_status("settings saved");
+            }
+            Err(error) => set_status(&format!("settings save failed: {error}")),
+        },
         Err(error) => {
             set_status(&format!("settings invalid: {error}"));
         }
@@ -380,6 +399,7 @@ fn settings_body(
     ratio: &str,
     auto_tiling: bool,
     include_dialogs: bool,
+    rules_body: &str,
 ) -> String {
     // The layout name is embedded only when it is a known kind (otherwise an
     // empty string, which the parser rejects), and number text only when it
@@ -394,7 +414,7 @@ fn settings_body(
         ""
     };
     format!(
-        "{{\n  \"version\": {},\n  \"layout\": \"{layout}\",\n  \"outer_gap\": {},\n  \"inner_gap\": {},\n  \"master_ratio\": {},\n  \"auto_tiling\": {},\n  \"include_dialogs\": {}\n}}\n",
+        "{{\n  \"version\": {},\n  \"layout\": \"{layout}\",\n  \"outer_gap\": {},\n  \"inner_gap\": {},\n  \"master_ratio\": {},\n  \"auto_tiling\": {},\n  \"include_dialogs\": {},\n  \"rules\": {rules_body}\n}}\n",
         crate::config::CONFIG_VERSION,
         number_text(outer),
         number_text(inner),
@@ -530,6 +550,9 @@ unsafe fn populate_settings(panel: SettingsPanel, config: &Config) {
         set_field_text(panel.ratio, &fmt_num(config.layout.master_ratio));
         set_checkbox(panel.auto_tiling, config.auto_tiling);
         set_checkbox(panel.dialogs, config.include_dialogs);
+        // The editor shows the canonical JSON of the effective rules; Save
+        // re-validates whatever the user typed there.
+        set_rules_text(panel.rules, &rules_json(&config.rules));
     }
 }
 
@@ -592,6 +615,10 @@ unsafe fn create_settings_panel(target: Id) -> SettingsPanel {
         make_label(content, K_SETTINGS_RECTS[6], "Master ratio");
         make_label(content, K_SETTINGS_RECTS[12], "changes on Save");
 
+        // Rules editor: a scrollable plain-text view holding the JSON array.
+        make_label(content, K_SETTINGS_RECTS[13], "Rules (JSON array)");
+        let rules = make_rules_text(content, K_SETTINGS_RECTS[14]);
+
         // Save / Close: the window retains them; the actions live on `target`.
         let _save = make_button(
             content,
@@ -616,6 +643,7 @@ unsafe fn create_settings_panel(target: Id) -> SettingsPanel {
             ratio,
             auto_tiling,
             dialogs,
+            rules,
         }
     }
 }
@@ -706,6 +734,58 @@ unsafe fn make_label(content: Id, place: (f64, f64, f64, f64), title: &str) {
         msg_void_id(label, sel("setStringValue:"), nsstring(title));
         msg_void_id(content, sel("addSubview:"), label);
     }
+}
+
+/// Allocate a scrollable plain-text view for the rules JSON editor and add it
+/// to `content`. Returns the text view handle (the scroll view is discarded —
+/// the window retains it).
+///
+/// SAFETY: main thread; `content` must be a live view.
+unsafe fn make_rules_text(content: Id, place: (f64, f64, f64, f64)) -> Handle {
+    // SAFETY: documented initialisers; the classic vertically-resizable text
+    // view inside a scroll view recipe, all documented selectors.
+    let text = unsafe {
+        let scroll = {
+            let alloc = msg0(class("NSScrollView"), sel("alloc"));
+            let scroll = msg_view_init(alloc, sel("initWithFrame:"), rect(place));
+            msg_bool(scroll, sel("setHasVerticalScroller:"), true);
+            msg_bool(scroll, sel("setAutohidesScrollers:"), true);
+            scroll
+        };
+        let text = {
+            let alloc = msg0(class("NSTextView"), sel("alloc"));
+            let text = msg_view_init(alloc, sel("initWithFrame:"), rect(place));
+            msg_bool(text, sel("setRichText:"), false);
+            msg_bool(text, sel("setEditable:"), true);
+            msg_bool(text, sel("setVerticallyResizable:"), true);
+            msg_bool(text, sel("setHorizontallyResizable:"), false);
+            msg_int(text, sel("setAutoresizingMask:"), 16);
+            // The container width follows the text view, so the editor wraps
+            // at the panel width; growth is vertical only.
+            let container = msg0(text, sel("textContainer"));
+            msg_bool(container, sel("setWidthTracksTextView:"), true);
+            text
+        };
+        msg_void_id(scroll, sel("setDocumentView:"), text);
+        msg_void_id(content, sel("addSubview:"), scroll);
+        text
+    };
+    Handle(text)
+}
+
+/// Replace the rules editor's text.
+///
+/// SAFETY: `view` must be a live NSTextView.
+unsafe fn set_rules_text(view: Handle, text: &str) {
+    unsafe { msg_void_id(view.0, sel("setString:"), nsstring(text)) };
+}
+
+/// Text of the rules editor.
+///
+/// SAFETY: `view` must be a live NSTextView.
+unsafe fn rules_view_text(view: Handle) -> String {
+    let value = unsafe { msg0(view.0, sel("string")) };
+    unsafe { utf8_string(value) }
 }
 
 // MARK: - Menu construction
@@ -1255,10 +1335,18 @@ pub fn self_test() {
             append_log("self-test: no live fixture — rules exercise skipped");
         }
 
-        // Settings panel: open through the same path the menu action uses,
-        // read the controls back, save custom values through the Save
-        // button's own helper, prove an invalid value is refused, then
-        // restore defaults for the next run.
+        // Settings panel + rules editor: open through the same path the menu
+        // action uses, read the controls back, save through the Save button's
+        // own helper, prove invalid input is refused, then restore defaults
+        // for the next run. A seeded rule is in place before the panel opens,
+        // so the editor displays it and a save round-trips it.
+        let mut seeded = Config::load().unwrap_or_default();
+        seeded.rules.push(WindowRule {
+            bundle: Some("com.example.seeded".to_string()),
+            pid: None,
+            dialogs: DialogPolicy::Exclude,
+        });
+        STATE.lock().unwrap().config = Some(seeded);
         show_settings();
         {
             let panel = STATE.lock().unwrap().settings.expect("panel built");
@@ -1270,20 +1358,13 @@ pub fn self_test() {
                 field_text(panel.ratio),
             );
             let (auto, dialogs) = (checkbox_on(panel.auto_tiling), checkbox_on(panel.dialogs));
+            let rules_text = rules_view_text(panel.rules);
             let visible = msg_u8(panel.window.0, sel("isVisible"));
             append_log(&format!(
-                "self-test: panel visible={visible} popup={popup:?} outer={outer} inner={inner} ratio={ratio} auto={auto} dialogs={dialogs}"
+                "self-test: panel visible={visible} popup={popup:?} outer={outer} inner={inner} ratio={ratio} auto={auto} dialogs={dialogs} rules={rules_text}"
             ));
-            // Seed a rule the panel does not edit, to prove a panel save
-            // never silently erases a hand-written rules list.
-            let mut seeded = Config::load().unwrap_or_default();
-            seeded.rules.push(WindowRule {
-                bundle: Some("com.example.seeded".to_string()),
-                pid: None,
-                dialogs: DialogPolicy::Exclude,
-            });
-            STATE.lock().unwrap().config = Some(seeded);
-            // 1) A valid custom value saved through the Save button's code path.
+            // 1) A valid custom value saved through the Save button's code
+            // path; the seeded rule round-trips through the editor.
             select_popup_title(panel.popup, "columns");
             set_field_text(panel.outer, "20");
             set_field_text(panel.inner, "4");
@@ -1294,7 +1375,8 @@ pub fn self_test() {
                 "self-test: custom save status = {}",
                 STATE.lock().unwrap().status.clone()
             ));
-            // The custom values must have landed on disk through Config::save.
+            // Custom values and the seeded rule must have landed on disk
+            // through Config::save.
             append_log(&format!(
                 "self-test: loaded after custom save = {:?}",
                 Config::load()
@@ -1306,13 +1388,48 @@ pub fn self_test() {
                 "self-test: invalid save status = {}",
                 STATE.lock().unwrap().status.clone()
             ));
-            // 3) Restore defaults so later runs start clean.
+            // 3) Rules edited in the editor: a pid rule replaces the seeded
+            // one (text in, entry validation, canonical text out).
+            set_field_text(panel.ratio, "0.7");
+            if let Some(pid) = fixture::registered_fixture_pid().filter(|pid| process_alive(*pid)) {
+                set_rules_text(
+                    panel.rules,
+                    &format!(r#"[{{"pid": {pid}, "dialogs": "include"}}]"#),
+                );
+            } else {
+                set_rules_text(
+                    panel.rules,
+                    r#"[{"bundle": "com.example.edited", "dialogs": "include"}]"#,
+                );
+            }
+            save_settings_from_panel();
+            append_log(&format!(
+                "self-test: rules edit save status = {}",
+                STATE.lock().unwrap().status.clone()
+            ));
+            append_log(&format!(
+                "self-test: loaded after rules edit = {:?}",
+                Config::load()
+            ));
+            // 4) Broken rules text is refused; the file keeps the last saved
+            // rules list.
+            set_rules_text(panel.rules, r#"[{"pid": 1"#);
+            save_settings_from_panel();
+            append_log(&format!(
+                "self-test: broken rules save status = {}",
+                STATE.lock().unwrap().status.clone()
+            ));
+            append_log(&format!(
+                "self-test: loaded after broken rules = {:?}",
+                Config::load().map(|config| config.rules)
+            ));
+            // 5) Restore defaults so later runs start clean.
             action_reset_defaults(std::ptr::null(), std::ptr::null());
             append_log(&format!(
                 "self-test: final settings status = {}",
                 STATE.lock().unwrap().status.clone()
             ));
-            // 4) Diagnostics through the action's own body (no mouse click):
+            // 6) Diagnostics through the action's own body (no mouse click):
             // one structured line into the shell log.
             action_diagnostics(std::ptr::null(), std::ptr::null());
         }
