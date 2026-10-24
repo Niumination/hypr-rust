@@ -399,6 +399,47 @@ pub fn dialog_policy_for(rules: &[WindowRule], pid: u32, bundle: Option<&str>) -
         .unwrap_or(DialogPolicy::Default)
 }
 
+/// Parse a standalone rules array, as entered in the settings panel's rules
+/// editor. The entire text must be one `[{rule}, ...]` list with the same
+/// per-entry validation as a config file; anything else is an error, so the
+/// panel can never embed unvalidated text into the body it saves.
+pub fn parse_rules_text(text: &str) -> Result<Vec<WindowRule>, ConfigError> {
+    let bytes = text.as_bytes();
+    let mut pos = 0usize;
+    skip_ws(bytes, &mut pos);
+    let value = parse_value(bytes, &mut pos)?;
+    skip_ws(bytes, &mut pos);
+    if pos != bytes.len() {
+        return Err(ConfigError::Parse);
+    }
+    parse_rules(&value)
+}
+
+/// Render rules as one compact, canonical JSON array. The settings panel
+/// writes only this generated text into the body it saves — never the raw
+/// editor text — so a typed quote cannot break the JSON structure.
+pub fn rules_json(rules: &[WindowRule]) -> String {
+    let mut out = String::from("[");
+    for (index, rule) in rules.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push('{');
+        let mut fields = Vec::new();
+        if let Some(bundle) = &rule.bundle {
+            fields.push(format!("\"bundle\": \"{}\"", json_escape(bundle)));
+        }
+        if let Some(pid) = rule.pid {
+            fields.push(format!("\"pid\": {pid}"));
+        }
+        fields.push(format!("\"dialogs\": \"{}\"", policy_name(rule.dialogs)));
+        out.push_str(&fields.join(", "));
+        out.push('}');
+    }
+    out.push(']');
+    out
+}
+
 /// A policy JSON literal.
 fn policy_name(policy: DialogPolicy) -> &'static str {
     match policy {
@@ -700,6 +741,75 @@ mod tests {
             ConfigError::Invalid("rules")
         );
         let _parcel = parse_config;
+    }
+
+    #[test]
+    fn parse_rules_text_uses_the_file_entry_validation() {
+        let rules = parse_rules_text(r#"[{"pid": 4, "dialogs": "include"}]"#).unwrap();
+        assert_eq!(
+            rules,
+            vec![WindowRule {
+                bundle: None,
+                pid: Some(4),
+                dialogs: DialogPolicy::Include,
+            }]
+        );
+
+        // The same array embedded in a full config parses identically.
+        let config =
+            parse_config(r#"{"version": 1, "rules": [{"pid": 4, "dialogs": "include"}]}"#).unwrap();
+        assert_eq!(config.rules, rules);
+
+        // Generated text and parsed rules round-trip.
+        let round = parse_rules_text(&rules_json(&rules)).unwrap();
+        assert_eq!(round, rules);
+        // Empty and multi-entry render.
+        assert_eq!(rules_json(&[]), "[]");
+        let two = rules_json(&[
+            WindowRule {
+                bundle: Some("com.a.b".to_string()),
+                pid: None,
+                dialogs: DialogPolicy::Exclude,
+            },
+            WindowRule {
+                bundle: None,
+                pid: Some(9),
+                dialogs: DialogPolicy::Default,
+            },
+        ]);
+        assert_eq!(
+            two,
+            r#"[{"bundle": "com.a.b", "dialogs": "exclude"},{"pid": 9, "dialogs": "default"}]"#
+        );
+    }
+
+    #[test]
+    fn parse_rules_text_rejects_non_rules_text() {
+        assert_eq!(parse_rules_text("").unwrap_err(), ConfigError::Parse);
+        assert_eq!(
+            parse_rules_text("not json").unwrap_err(),
+            ConfigError::Parse
+        );
+        // Trailing junk after a valid list.
+        assert_eq!(
+            parse_rules_text(r#"[{"pid": 1}] x"#).unwrap_err(),
+            ConfigError::Parse
+        );
+        // An object is not a rules list.
+        assert_eq!(
+            parse_rules_text(r#"{"pid": 1}"#).unwrap_err(),
+            ConfigError::Invalid("rules")
+        );
+        // A no-matcher rule fails closed here too.
+        assert_eq!(
+            parse_rules_text(r#"[{"dialogs": "include"}]"#).unwrap_err(),
+            ConfigError::Invalid("rules")
+        );
+        // Structural break-outs cannot parse as text (the writer regenerates).
+        assert_eq!(
+            parse_rules_text(r#"[{]}}"#).unwrap_err(),
+            ConfigError::Parse
+        );
     }
 
     #[test]
