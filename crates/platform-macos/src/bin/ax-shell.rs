@@ -6,9 +6,8 @@
 //! quit. Auto-tiling stays off until the user picks a reflow command.
 //!
 //! Extra modes (no run loop):
-//! - `--self-test` exercises the shell: it creates the app, status item and
-//!   menu, reports the menu contents, then runs one reflow. Host evidence
-//!   without a mouse click.
+//! - `--self-test` exercises the shell and returns an exit code: 0 pass,
+//!   1 restore failure, 2 skipped run (pre-run config invalid/unsafe).
 //! - `--reset-defaults` writes the default config to `~/.hypr-rust/config.json`.
 
 fn main() {
@@ -22,7 +21,10 @@ fn main() {
             }
         }
     } else if args.iter().any(|arg| arg == "--self-test") {
-        hypr_rust_platform_macos::shell::self_test();
+        // The self-test is evidence, not a demo: a failed restore or a
+        // skipped run must return a failing exit code.
+        let code = hypr_rust_platform_macos::shell::self_test();
+        std::process::exit(code);
     } else {
         hypr_rust_platform_macos::shell::run();
     }

@@ -1243,12 +1243,56 @@ unsafe fn menu_titles(menu: Id) -> Vec<String> {
 /// `ax-shell --self-test` as host evidence without a mouse click.
 ///
 /// Objects created here live for the process, which exits right after.
-pub fn self_test() {
+/// Exit codes of the fixture-bound self-test.
+/// 0 - full pass: the pre-run config was restored, or an absent pre-run file
+///     was removed again.
+/// 1 - restore (or no-file removal) failed; the run must not look successful.
+/// 2 - skipped run: the pre-run config was invalid/unsafe, so no test that
+///     writes or resets the config ever started; the file is left untouched.
+const K_SELF_TEST_EXIT_OK: i32 = 0;
+const K_SELF_TEST_EXIT_RESTORE_FAILED: i32 = 1;
+const K_SELF_TEST_EXIT_SKIPPED: i32 = 2;
+
+/// One classification of the config file state before a self-test may write.
+enum PreRun {
+    /// The file loads through `Config::load`, which enforces owner-only 0600.
+    Valid(Config),
+    /// No config file exists.
+    Missing,
+    /// Malformed content, or a file this app would never itself write
+    /// (symlink, foreign uid, mode other than 0600). The run must not touch it.
+    Unsafe(String),
+}
+
+fn classify_pre_run() -> PreRun {
+    let path = match crate::config::config_path() {
+        Ok(path) => path,
+        Err(error) => return PreRun::Unsafe(format!("home path unavailable: {error}")),
+    };
+    let mode = match std::fs::metadata(&path) {
+        Ok(meta) => {
+            use std::os::unix::fs::PermissionsExt;
+            meta.permissions().mode() & 0o777
+        }
+        // Missing is a first-class state: the run may write and must restore
+        // to no-file at the end.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return PreRun::Missing,
+        Err(error) => return PreRun::Unsafe(format!("unreadable: {error}")),
+    };
+    match crate::config::Config::load() {
+        Ok(config) => PreRun::Valid(config),
+        Err(crate::config::ConfigError::NotOwnerOnly) => PreRun::Unsafe(format!(
+            "not owner-only (mode {mode:o}) or a symlink/foreign uid"
+        )),
+        Err(error) => PreRun::Unsafe(format!("config invalid: {error}")),
+    }
+}
+
+pub fn self_test() -> i32 {
     unsafe {
-        // The self-test rewrites the config many times; grab the pre-run
-        // file first so the run can restore what was there instead of
-        // leaving the profile on defaults.
-        let initial = Config::load().ok();
+        // The pre-run file is classified before anything in this run may
+        // write: valid, missing, or invalid/unsafe (fail closed, untouched).
+        let pre_run = classify_pre_run();
 
         // AppKit requires an autorelease pool on the thread that creates
         // autoreleased objects.
@@ -1289,6 +1333,28 @@ pub fn self_test() {
         perform_reflow();
         append_log(&format!("self-test: after reflow = {}", status_line()));
 
+        // The classification subsumes every config write below. The reflow
+        // just performed used only the in-memory state - no disk writes are
+        // triggered by it.
+        if let PreRun::Unsafe(reason) = &pre_run {
+            append_log(&format!(
+                "self-test: pre-run config classified invalid/unsafe ({reason}); config-mutating sections not started, file left untouched"
+            ));
+            action_diagnostics(std::ptr::null(), std::ptr::null());
+            append_log(&format!(
+                "self-test: exit {K_SELF_TEST_EXIT_SKIPPED} (skipped run)"
+            ));
+            msg_void(pool, sel("drain"));
+            return K_SELF_TEST_EXIT_SKIPPED;
+        }
+        match &pre_run {
+            PreRun::Valid(_) => {
+                append_log("self-test: pre-run config classified valid (owner-only 0600); full run")
+            }
+            PreRun::Missing => append_log("self-test: pre-run config classified missing; full run"),
+            PreRun::Unsafe(_) => unreachable!("handled above"),
+        }
+
         // Rules: the first matching rule shifts the dialog policy for that
         // app only. Rule exclude wins over a global include, then rule include
         // wins over a global exclude; both end with a reset so the panel
@@ -1307,7 +1373,11 @@ pub fn self_test() {
                 pid: Some(pid),
                 dialogs: DialogPolicy::Exclude,
             });
-            config.save().expect("self-test rules config write");
+            // A failed write must not abort the run before the restore can
+            // report; log and continue (the final exit code governs success).
+            if let Err(error) = config.save() {
+                append_log(&format!("self-test: rules config write failed: {error}"));
+            }
             STATE.lock().unwrap().config = Some(config);
             perform_reflow();
             append_log(&format!(
@@ -1322,7 +1392,11 @@ pub fn self_test() {
                 pid: Some(pid),
                 dialogs: DialogPolicy::Include,
             });
-            config.save().expect("self-test rules config write");
+            // A failed write must not abort the run before the restore can
+            // report; log and continue (the final exit code governs success).
+            if let Err(error) = config.save() {
+                append_log(&format!("self-test: rules config write failed: {error}"));
+            }
             STATE.lock().unwrap().config = Some(config);
             perform_reflow();
             append_log(&format!(
@@ -1434,30 +1508,56 @@ pub fn self_test() {
                 "self-test: final settings status = {}",
                 STATE.lock().unwrap().status.clone()
             ));
-            // 6) Then restore what the run started with, so the self-test is
-            // transparent to a real profile; a run that started without a
-            // valid file stays on plain defaults.
-            match initial {
-                Some(config) => match config.save() {
-                    Ok(()) => {
-                        // The file is restored; adopt it in memory too, so
-                        // the status line and the after-run diagnostics
-                        // report exactly what is on disk.
-                        STATE.lock().unwrap().config = Some(config);
-                        set_status("config restored to its pre-run state");
-                        append_log("self-test: config restored to its pre-run state");
-                    }
-                    Err(error) => append_log(&format!("self-test: config restore failed: {error}")),
-                },
-                None => {
-                    append_log(
-                        "self-test: pre-run config unavailable (missing or invalid); left at defaults",
-                    );
-                }
-            }
-            // 7) Diagnostics after restore: must match the file now on disk.
-            action_diagnostics(std::ptr::null(), std::ptr::null());
         }
+        // 6) Restore exactly what the run started with, so the run is
+        // transparent to the profile: the file through the app's own save
+        // path and the in-memory state adopted, and a pre-run state with no
+        // file returns to no file (the file this run created is removed). A
+        // restore that fails fails the run - never looks successful.
+        let exit_code = match pre_run {
+            PreRun::Valid(config) => match config.save() {
+                Ok(()) => {
+                    STATE.lock().unwrap().config = Some(config);
+                    set_status("config restored to its pre-run state");
+                    append_log("self-test: config restored to its pre-run state");
+                    K_SELF_TEST_EXIT_OK
+                }
+                Err(error) => {
+                    append_log(&format!("self-test: config restore failed: {error}"));
+                    K_SELF_TEST_EXIT_RESTORE_FAILED
+                }
+            },
+            PreRun::Missing => match crate::config::config_path() {
+                Ok(path) => match std::fs::remove_file(&path) {
+                    Ok(()) => {
+                        set_status("pre-run config was absent; run-created file removed");
+                        append_log(
+                            "self-test: pre-run config was absent; removed the file this run created",
+                        );
+                        K_SELF_TEST_EXIT_OK
+                    }
+                    Err(error) => {
+                        append_log(&format!(
+                            "self-test: restoring the no-file state failed: {error}"
+                        ));
+                        K_SELF_TEST_EXIT_RESTORE_FAILED
+                    }
+                },
+                Err(error) => {
+                    append_log(&format!(
+                        "self-test: home path for restore unavailable: {error}"
+                    ));
+                    K_SELF_TEST_EXIT_RESTORE_FAILED
+                }
+            },
+            // The skipped run returned above.
+            PreRun::Unsafe(_) => K_SELF_TEST_EXIT_RESTORE_FAILED,
+        };
+        // 7) Diagnostics after restore: must match what is (or is not) on
+        // disk - the summary reads the adopted in-memory state.
+        action_diagnostics(std::ptr::null(), std::ptr::null());
+        append_log(&format!("self-test: exit {exit_code}"));
         msg_void(pool, sel("drain"));
+        exit_code
     }
 }

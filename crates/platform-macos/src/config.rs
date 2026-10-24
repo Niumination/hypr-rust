@@ -246,6 +246,11 @@ fn fmt(value: f64) -> String {
     }
 }
 
+/// The exact owner-only file mode this app writes and requires: 0600.
+pub fn is_owner_only_mode(mode: u32) -> bool {
+    mode & 0o777 == 0o600
+}
+
 /// Owner-only check shared with the fixture registration guard.
 fn verify_owner_only(meta: &std::fs::Metadata) -> Result<(), ConfigError> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -255,7 +260,7 @@ fn verify_owner_only(meta: &std::fs::Metadata) -> Result<(), ConfigError> {
     if meta.uid() != unsafe { ffi::getuid() } {
         return Err(ConfigError::NotOwnerOnly);
     }
-    if meta.permissions().mode() & 0o777 != 0o600 {
+    if !is_owner_only_mode(meta.permissions().mode()) {
         return Err(ConfigError::NotOwnerOnly);
     }
     Ok(())
@@ -789,6 +794,18 @@ mod tests {
             two,
             r#"[{"bundle": "com.a.b", "dialogs": "exclude"},{"pid": 9, "dialogs": "default"}]"#
         );
+    }
+
+    #[test]
+    fn owner_only_mode_boundary() {
+        assert!(is_owner_only_mode(0o600));
+        // File-type bits ride above the permission bits.
+        assert!(is_owner_only_mode(0o100_600));
+        assert!(!is_owner_only_mode(0o644));
+        // Owner read-only is not the mode the app writes either.
+        assert!(!is_owner_only_mode(0o400));
+        assert!(!is_owner_only_mode(0o777));
+        assert!(!is_owner_only_mode(0o000));
     }
 
     #[test]
