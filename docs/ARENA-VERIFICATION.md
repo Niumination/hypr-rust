@@ -131,6 +131,13 @@ These results were produced **on the owner's host by the owner**, not independen
 - Coordinate convention recorded: AX frames use a **top-left origin**, so the caller-supplied work area must exclude the menu bar. `0 0 1920 1080` placed a window under the menu bar, macOS clamped it, the read-back mismatched (y 12→30) and the batch rolled back with `rollback_all_restored=true` — the rollback path verified.
 - Rust: fmt OK, clippy clean, 27/27 platform-macos (+2 `ax-keyboard`), 23/23 workspace.
 
+**Path D — minimal macOS menu-bar shell (macOS, host 2026-10-24): PASS.**
+- `ax-shell` (Rust `NSStatusItem`, no new dependencies) created a status item and a 10-item menu read back through AppKit: status line, `Reflow: master-stack`, `Reflow: columns`, `Pause`, Accessibility status, `Diagnostics`, `Quit`.
+- `ax-shell --self-test` ran one reflow on the registered fixture; the two windows moved from `(100,668,420,312)` / `(620,348,420,312)` to `(12,42,1038,1026)` / `(1058,42,850,1026)`, verified by `ax-probe windows`. `ax-shell` (the run loop) stayed alive.
+- Auto-tiling stays off: nothing is applied until a reflow is chosen. Work area = `CGDisplayBounds` minus a documented 30 pt menu-bar inset.
+- `-[NSMenuItem initWithTitle:action:keyEquivalent:]` raised an Objective-C exception on this build; items are created with `+new` plus `setTitle:`/`setAction:`/`setTarget:`.
+- Not done: event loop/auto-tiling, settings UI, hotkeys, diagnostics UI (appends to `~/.hypr-rust/shell.log`), signed bundle.
+
 **Permission-denied native run (2026-10-23, owner host): PASS.**
 - Context: a one-shot **launchd user-domain** job (`label com.hyprtest.ax-denied-check`, `RunAtLoad`, `/bin/sh` wrapper) ran the read-only `ax-probe frame 1`; the job's responsible process itself holds no Accessibility grant. No sudo, no TCC database change, no system settings or Remote Login change; the job was removed (`launchctl bootout`) immediately after and is not part of any repo.
 - Result: `AXIsProcessTrusted()` returns false → `connect()` gate fires → `error: permission denied (Accessibility not granted)`, **exit 3**; no AX call was made.

@@ -32,6 +32,34 @@ fn lock_path() -> Result<PathBuf, ()> {
     Ok(fixture_dir()?.join("fixture.lock"))
 }
 
+/// The registered fixture's pid, only when the registration is valid, the pid
+/// is alive and the liveness lock is held.
+///
+/// Unlike [`verify_registration`] this does not need the token: the shell is the
+/// product and never learns the fixture token. It still fails closed on a
+/// missing/stale registration or a free lock.
+pub fn registered_fixture_pid() -> Option<u32> {
+    let path = registration_path().ok()?;
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+        return None;
+    }
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if meta.uid() != unsafe { ffi::getuid() } {
+        return None;
+    }
+    if meta.permissions().mode() & 0o777 != 0o600 {
+        return None;
+    }
+    let body = std::fs::read_to_string(&path).ok()?;
+    let (pid, _token) = parse_registration(&body)?;
+    if !process_alive(pid) {
+        return None;
+    }
+    verify_lock().ok()?;
+    Some(pid)
+}
+
 /// Verify the fixture registration end-to-end (fail closed).
 pub fn verify_registration(pid: u32, token: &str) -> Result<(), FixtureError> {
     let path = registration_path().map_err(|_| FixtureError::Unregistered)?;
