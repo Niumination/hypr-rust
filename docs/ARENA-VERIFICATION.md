@@ -37,7 +37,7 @@ Platform-macos is deliberately **outside** workspace members: `cargo build/test 
 | C9 | Preflight + best-effort rollback; recovery failure reported (NOT atomic) | report §5/§6/§7; `adapter.rs` `validate_frame_rect` (`Rect::is_finite_and_positive`), `set_window_frame_txn` (PositionWriteFailed / SizeAfterPositionFailed / VerificationReadFailed / VerificationFailed) | `ax-probe set-frame --target <pid> --token <hex> nan 0 100 100` → exit 1, window unchanged; 9 mock unit tests; AX not transactional → rollback best-effort (§7) |
 | C10 | Workspace builds without macOS | root `Cargo.toml` members = layout-core only; platform-macos standalone `[workspace]` | `cargo test --workspace` on any OS → layout-core only, no Apple link |
 | C11 | (F1) Mutation commands require a token matching the self-owned fixture registration; otherwise refused before any AX call | `fixture.rs` `verify_registration` (file regular non-symlink 0600 uid-match, pid+token match, pid alive, flock lock held — only EWOULDBLOCK/EAGAIN accepted as 'held', other errors reject), exit 5; `adapter.rs` `process_alive` | `ax-probe set-frame <pid> 1 2 3 4` → exit 5; live run §5 |
-| C12 | (F2) `set_window_frame` read-back verification: mismatch → full rollback + typed `VerificationFailed`; all post-mutation failures roll back | `adapter.rs` `frames_match` + `set_window_frame_txn` (PositionWriteFailed / SizeAfterPositionFailed / VerificationReadFailed / VerificationFailed); 9 mock unit tests | unit tests 27/27; live run §5 (all read-backs matched) |
+| C12 | (F2) `set_window_frame` read-back verification: mismatch → full rollback + typed `VerificationFailed`; all post-mutation failures roll back | `adapter.rs` `frames_match` + `set_window_frame_txn` (PositionWriteFailed / SizeAfterPositionFailed / VerificationReadFailed / VerificationFailed); 9 mock unit tests | unit tests 33/33; live run §5 (all read-backs matched) |
 | C13 | (F1b) Fixture registration is lifecycle-bounded; rejects stale records when the lock is free (lock does NOT bind fixture identity to the AX operation — see C14) | `spike-macos.swift` `acquireFixtureLock`/`writeRegistration`/`removeRegistration` (flock held for fixture lifetime, atomic 0600 write, cleanup on terminate); `ax-probe.rs` `verify_fixture_lock` | live run §5: lock held while alive, freed on death → stale record rejected |
 | C14 | Lock check is a test guard, not absolute PID-reuse proof (TOCTOU) | `ax-probe.rs` `verify_fixture_lock` (checked before AX, fd closed) | documented: lock proves fixture alive at check time, not at mutation time; stronger claim needs binding fixture identity to the mutation operation (future work) |
 | C15 | (M2) Explicit keyboard-first actions on the registered fixture via `ax-keyboard` | `ax-keyboard.rs` `select`/`move`/`resize`/`raise`; `fixture.rs` `verify_registration` | native run §M2: select ok · no-token exit 5 · move/resize/raise ok · invalid exit 1 · stale exit 4 |
@@ -70,7 +70,7 @@ MACOSX_DEPLOYMENT_TARGET=26.0 cargo test --workspace          # 23/23
 cargo fmt --manifest-path crates/platform-macos/Cargo.toml --check
 MACOSX_DEPLOYMENT_TARGET=26.0 cargo clippy --manifest-path crates/platform-macos/Cargo.toml --all-targets -- -D warnings
 cd crates/platform-macos
-MACOSX_DEPLOYMENT_TARGET=26.0 cargo test                      # 27/27 lib + 2 ax-keyboard
+MACOSX_DEPLOYMENT_TARGET=26.0 cargo test                      # 33/33 lib + 2 ax-keyboard
 MACOSX_DEPLOYMENT_TARGET=26.0 cargo build --bin ax-probe --bin ax-keyboard
 
 # native (owner host): harness from spike branch @ 0eb9a25
@@ -117,7 +117,7 @@ These results were produced **on the owner's host by the owner**, not independen
 - Host: ThinkPad X13 Yoga Gen 1 (Intel i5-10310U), macOS Tahoe 26.7.1 build 25G241, AX granted, OpenCore spoof `SystemProductName=MacBookPro16,2` (a spoof is not device identity).
 - `select`/`move`/`resize`/`raise` PASS (frame persisted); invalid geometry rejected **without changing the fixture** (exit 1); no-token exit 5; stale exit 4.
 - **Permission-denied: runtime-tested 2026-10-23** via an AX-untrusted launchd user-domain job — exit 3 with `error: permission denied (Accessibility not granted)`; see the section below. Success on normal operations never proved behavior on failure; this run closes that gap in one context.
-- Rust checks (separate): fmt OK, clippy clean, 27/27 platform-macos (+2 `ax-keyboard`), 23/23 workspace.
+- Rust checks (separate): fmt OK, clippy clean, 33/33 platform-macos (+2 `ax-keyboard`), 23/23 workspace.
 
 **Read-only multi-window probe (2 & 3 self-owned fixture windows): PASS, repeatable.**
 - `AXWindows` per PID ✓; `AXUIElementGetPid` match per element ✓; `AXPosition`/`AXSize` read-back finite/positive ✓; `AXUIElementIsAttributeSettable` recorded ✓ (`AXPosition=true`, `AXSize=false`).
@@ -129,7 +129,7 @@ These results were produced **on the owner's host by the owner**, not independen
 - `ax-probe windows <pid>` enumerated **two self-owned `HYPR-SPIKE-TARGET` windows in one process** and gave each a distinct runtime key; `ax-probe apply --display 0 24 1920 1056` computed a master-stack plan (master = the focused window), mapped planner `WindowId`s to native keys, applied both targets, `rollback_all_restored=true`, exit 0, verified by read-back; a second run was idempotent.
 - `ax-probe batch --plan` applied explicit frames; a plan naming an unobserved key failed closed (`UnknownTarget`) with **no writes**.
 - Coordinate convention recorded: AX frames use a **top-left origin**, so the caller-supplied work area must exclude the menu bar. `0 0 1920 1080` placed a window under the menu bar, macOS clamped it, the read-back mismatched (y 12→30) and the batch rolled back with `rollback_all_restored=true` — the rollback path verified.
-- Rust: fmt OK, clippy clean, 27/27 platform-macos (+2 `ax-keyboard`), 23/23 workspace.
+- Rust: fmt OK, clippy clean, 33/33 platform-macos (+2 `ax-keyboard`), 23/23 workspace.
 
 **Path D — minimal macOS menu-bar shell (macOS, host 2026-10-24): PASS.**
 - `ax-shell` (Rust `NSStatusItem`, no new dependencies) created a status item and a 10-item menu read back through AppKit: status line, `Reflow: master-stack`, `Reflow: columns`, `Pause`, Accessibility status, `Diagnostics`, `Quit`.
@@ -137,6 +137,12 @@ These results were produced **on the owner's host by the owner**, not independen
 - Auto-tiling stays off: nothing is applied until a reflow is chosen. Work area = `CGDisplayBounds` minus a documented 30 pt menu-bar inset.
 - `-[NSMenuItem initWithTitle:action:keyEquivalent:]` raised an Objective-C exception on this build; items are created with `+new` plus `setTitle:`/`setAction:`/`setTarget:`.
 - Not done: event loop/auto-tiling, settings UI, hotkeys, diagnostics UI (appends to `~/.hypr-rust/shell.log`), signed bundle.
+
+**Path E — config-driven shell settings (macOS, host 2026-10-24): PASS.**
+- `~/.hypr-rust/config.json` (flat JSON, no dependencies): `version`, `layout`, `outer_gap`, `inner_gap`, `master_ratio`, `auto_tiling` (default `false`), `include_dialogs`; must be a regular non-symlink owner-only `0600` file, enforced on load and on write (temp + rename). Wrong value types, out-of-range numbers and unknown layouts/versions are rejected; unknown keys are ignored.
+- A `columns` config (gaps 20/4, ratio 0.6) made the menu read back `Reflow: columns` / `settings: layout=columns gaps=20/4 ratio=0.6 auto-tiling=off dialogs=out` and the reflow placed the two fixture windows at `(20,50,938,1010)` / `(962,50,938,1010)` — the exact work-area-minus-gaps arithmetic. A `0644` config failed closed with the `0600` message and fell back to defaults; `ax-shell --reset-defaults` wrote the defaults back as `0600` and a master-stack reflow reproduced `(12,42,1038,1026)` / `(1058,42,850,1026)`.
+- `auto_tiling` exists as the explicit opt-in switch only; no automatic tiling is implemented and nothing is applied without a user reflow command.
+- Rust: fmt OK, clippy clean, 33/33 platform-macos (+2 `ax-keyboard`), 23/23 workspace.
 
 **Permission-denied native run (2026-10-23, owner host): PASS.**
 - Context: a one-shot **launchd user-domain** job (`label com.hyprtest.ax-denied-check`, `RunAtLoad`, `/bin/sh` wrapper) ran the read-only `ax-probe frame 1`; the job's responsible process itself holds no Accessibility grant. No sudo, no TCC database change, no system settings or Remote Login change; the job was removed (`launchctl bootout`) immediately after and is not part of any repo.

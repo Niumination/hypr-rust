@@ -14,10 +14,11 @@ use std::ffi::CString;
 use std::os::raw::c_char;
 use std::sync::Mutex;
 
-use layout_core::{DisplayId, LayoutConfig, LayoutKind, Rect};
+use layout_core::{DisplayId, Rect};
 
 use crate::adapter::MacAxAdapter;
 use crate::batch;
+use crate::config::{Config, ConfigError};
 use crate::ffi::{self, CGFloat};
 use crate::{fixture, process_alive};
 
@@ -147,6 +148,7 @@ struct ShellState {
     app: Handle,
     status_item: Handle,
     target: Handle,
+    config: Option<Config>,
     status: String,
 }
 
@@ -155,15 +157,31 @@ static STATE: Mutex<ShellState> = Mutex::new(ShellState {
     app: Handle::null(),
     status_item: Handle::null(),
     target: Handle::null(),
+    config: None,
     status: String::new(),
 });
 
-extern "C" fn action_reflow_master_stack(_this: Id, _cmd: Sel) {
-    perform_reflow(LayoutKind::MasterStack);
+/// The loaded config, or the defaults before one is loaded.
+fn current_config() -> Config {
+    STATE.lock().unwrap().config.clone().unwrap_or_default()
 }
 
-extern "C" fn action_reflow_columns(_this: Id, _cmd: Sel) {
-    perform_reflow(LayoutKind::Columns);
+/// Load the config, falling back to defaults. A missing file is normal
+/// (defaults); anything else is reported to the log without being fatal.
+fn load_config_or_default() -> Config {
+    match Config::load() {
+        Ok(config) => config,
+        Err(error) => {
+            if !matches!(error, ConfigError::Missing) {
+                append_log(&format!("config: {error}"));
+            }
+            Config::default()
+        }
+    }
+}
+
+extern "C" fn action_reflow(_this: Id, _cmd: Sel) {
+    perform_reflow();
 }
 
 extern "C" fn action_toggle_pause(_this: Id, _cmd: Sel) {
@@ -172,6 +190,13 @@ extern "C" fn action_toggle_pause(_this: Id, _cmd: Sel) {
         state.paused = !state.paused;
     }
     refresh_menu();
+}
+
+extern "C" fn action_reset_defaults(_this: Id, _cmd: Sel) {
+    match Config::default().save() {
+        Ok(()) => set_status("settings reset to defaults"),
+        Err(error) => set_status(&format!("reset failed: {error}")),
+    }
 }
 
 extern "C" fn action_diagnostics(_this: Id, _cmd: Sel) {
@@ -230,13 +255,21 @@ unsafe fn separator() -> Id {
 unsafe fn build_menu(target: Id) -> Id {
     // SAFETY: documented class/instance initialisers.
     let menu = unsafe { msg0(class("NSMenu"), sel("new")) };
+    let config = current_config();
     unsafe {
         msg_bool(menu, sel("setAutoenablesItems:"), false);
         add_status(menu, &status_line());
         msg_void_id(menu, sel("addItem:"), separator());
-        add_action(menu, target, "Reflow: master-stack", "reflowMasterStack:");
-        add_action(menu, target, "Reflow: columns", "reflowColumns:");
+        add_action(
+            menu,
+            target,
+            &format!("Reflow: {}", config.kind_name()),
+            "reflow:",
+        );
         add_action(menu, target, "Pause", "togglePause:");
+        msg_void_id(menu, sel("addItem:"), separator());
+        add_status(menu, &settings_line());
+        add_action(menu, target, "Reset to defaults", "resetDefaults:");
         msg_void_id(menu, sel("addItem:"), separator());
         add_status(menu, &accessibility_line());
         add_action(menu, target, "Diagnostics", "diagnostics:");
@@ -292,6 +325,30 @@ fn accessibility_line() -> String {
     }
 }
 
+/// Settings summary line for the menu.
+fn settings_line() -> String {
+    let state = STATE.lock().unwrap();
+    let config = state.config.clone().unwrap_or_default();
+    let auto_tiling = if config.auto_tiling { "on" } else { "off" };
+    let dialogs = if config.include_dialogs { "in" } else { "out" };
+    format!(
+        "settings: layout={} gaps={}/{} ratio={} auto-tiling={auto_tiling} dialogs={dialogs}",
+        config.kind_name(),
+        fmt_num(config.layout.outer_gap),
+        fmt_num(config.layout.inner_gap),
+        fmt_num(config.layout.master_ratio),
+    )
+}
+
+/// Render an f64 without trailing noise.
+fn fmt_num(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{}", value as i64)
+    } else {
+        format!("{value}")
+    }
+}
+
 /// Append a line to the shell log. Best-effort: a log failure is never fatal
 /// and never affects window state.
 fn append_log(line: &str) {
@@ -330,20 +387,23 @@ fn work_area() -> Rect {
 
 /// Run one explicit reflow against the registered fixture.
 ///
-/// Read-only up to the plan; only an explicit user command reaches the batch
-/// (best-effort rollback, [ADR-0005](../adr/0005-batch-multiwindow-best-effort-rollback.md)).
-fn perform_reflow(kind: LayoutKind) {
+/// The layout, gaps and dialog policy come from the loaded config; only an
+/// explicit user command reaches the batch (best-effort rollback,
+/// [ADR-0005](../adr/0005-batch-multiwindow-best-effort-rollback.md)).
+fn perform_reflow() {
     if STATE.lock().unwrap().paused {
         set_status("paused");
         return;
     }
-    let label = match kind {
-        LayoutKind::MasterStack => "master-stack",
-        LayoutKind::Columns => "columns",
-        other => {
-            set_status(&format!("unsupported layout {other:?}"));
-            return;
-        }
+    let (kind, layout, include_dialogs, label) = {
+        let config = current_config();
+        let (kind, layout) = config.plan_config();
+        (
+            kind,
+            layout,
+            config.include_dialogs,
+            config.kind_name().to_string(),
+        )
     };
     let adapter = match MacAxAdapter::connect() {
         Ok(adapter) => adapter,
@@ -371,8 +431,8 @@ fn perform_reflow(kind: LayoutKind) {
         &observation.snapshot,
         DisplayId(0),
         kind,
-        LayoutConfig::default(),
-        false,
+        layout,
+        include_dialogs,
     ) {
         Ok(plan) => plan,
         Err(error) => {
@@ -428,20 +488,20 @@ unsafe fn create_target() -> Id {
     unsafe {
         ffi::class_addMethod(
             cls,
-            sel("reflowMasterStack:"),
-            imp(action_reflow_master_stack),
-            types.as_ptr() as *const c_char,
-        );
-        ffi::class_addMethod(
-            cls,
-            sel("reflowColumns:"),
-            imp(action_reflow_columns),
+            sel("reflow:"),
+            imp(action_reflow),
             types.as_ptr() as *const c_char,
         );
         ffi::class_addMethod(
             cls,
             sel("togglePause:"),
             imp(action_toggle_pause),
+            types.as_ptr() as *const c_char,
+        );
+        ffi::class_addMethod(
+            cls,
+            sel("resetDefaults:"),
+            imp(action_reset_defaults),
             types.as_ptr() as *const c_char,
         );
         ffi::class_addMethod(
@@ -479,6 +539,9 @@ pub fn run() {
 
         let target = create_target();
         assert!(!target.is_null(), "failed to create the action target");
+
+        // Load the config before building the menu so the menu reflects it.
+        STATE.lock().unwrap().config = Some(load_config_or_default());
 
         let bar = msg0(class("NSStatusBar"), sel("systemStatusBar"));
         let item = msg_cgfloat(
@@ -540,6 +603,10 @@ pub fn self_test() {
 
         let target = create_target();
         assert!(!target.is_null(), "failed to create the action target");
+
+        // Load the config before building the menu so the menu reflects it.
+        STATE.lock().unwrap().config = Some(load_config_or_default());
+
         let menu = build_menu(target);
         let titles = menu_titles(menu);
 
@@ -559,7 +626,7 @@ pub fn self_test() {
 
         append_log(&format!("self-test: menu items = {titles:?}"));
         append_log(&format!("self-test: status = {}", status_line()));
-        perform_reflow(LayoutKind::MasterStack);
+        perform_reflow();
         append_log(&format!("self-test: after reflow = {}", status_line()));
         msg_void(pool, sel("drain"));
     }

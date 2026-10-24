@@ -9,6 +9,7 @@
 
 pub mod adapter;
 pub mod batch;
+pub mod config;
 pub mod ffi;
 pub mod fixture;
 pub mod shell;
