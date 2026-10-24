@@ -55,6 +55,7 @@ The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md)
 - M2 keyboard-first `ax-keyboard` — explicit select/move/resize/raise on the registered fixture (Jalur A PASS, host-bound: ThinkPad X13 Yoga Gen 1, macOS Tahoe 26.7.1).
 - Native batch — `ax-probe batch` applies a multi-window plan with best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)); native-run on the owner's host (two-window success and two-window rollback, both verified). Permission-denied runtime-tested 2026-10-23 via an AX-untrusted launchd user-domain context (exit 3, §6 caveat: one context only).
 - Per-window identity — `ax-probe windows <pid>` enumerates one process's `AXWindows` and `ax-probe apply ... --display ...` runs the snapshot → planner → native-key mapping → batch slice. Host-run 2026-10-23 on the owner's machine: two self-owned windows in one process enumerated with distinct runtime keys, master-stack plan applied and verified, `UnknownTarget` fails closed, rollback verified (see `docs/PLATFORM-SPIKES.md`).
+- Menu-bar shell — `ax-shell` (Rust `NSStatusItem`) shows a status line, explicit reflow commands, pause, an Accessibility status line, diagnostics and quit. Host-run 2026-10-24: the menu was created and read back, one reflow moved the two fixture windows and was verified. Auto-tiling stays off; no settings UI, hotkeys or signed bundle yet.
 
 **Read-only research — not control evidence:**
 

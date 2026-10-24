@@ -49,6 +49,14 @@ The batch above addressed targets by pid, which cannot name more than one window
 
 **Coordinate convention (recorded):** AX frames use a **top-left origin**, so the `--display` work area must exclude the menu bar. Passing `0 0 1920 1080` placed a window under the menu bar; macOS clamped it and the read-back mismatched (y 12→30), so the batch rolled back and reported `rollback_all_restored=true` with the restored frame — the rollback path working as documented. The adapter does not query the work area yet; the caller supplies it.
 
+### Spike 1 addendum — minimal macOS menu-bar shell (recorded result)
+
+`ax-shell` is a Rust `NSStatusItem` shell (AppKit through `unsafe` FFI confined to `ffi.rs`/`shell.rs`, no new dependencies): a status line, `Reflow: master-stack`, `Reflow: columns`, `Pause`, an Accessibility status line, `Diagnostics` and `Quit`. Auto-tiling stays **off** — nothing is applied until the user picks a reflow. The work area is the main display bounds (`CGDisplayBounds`) minus a documented 30 pt menu-bar inset, matching the AX top-left origin.
+
+**Host run (2026-10-24, owner host, AX granted, self-owned fixture):** `ax-shell --self-test` built the menu and read its 10 items back through AppKit, then ran one reflow; the two fixture windows moved from `(100,668,420,312)` / `(620,348,420,312)` to `(12,42,1038,1026)` / `(1058,42,850,1026)`, verified by `ax-probe windows`. `ax-shell` (the run loop) stayed alive, so the status item was created.
+
+**Not done:** no event loop or auto-tiling, no settings UI, no hotkeys, no diagnostics UI (`Diagnostics` appends to `~/.hypr-rust/shell.log`), no signed bundle. Note: `-[NSMenuItem initWithTitle:action:keyEquivalent:]` raised an Objective-C exception on this build, so items are created with `+new` plus `setTitle:`/`setAction:`/`setTarget:` instead.
+
 ## Spike 2 — native workspace contract (conditional feature gate)
 
 Required set—test each operation independently, then as an end-to-end workflow:

@@ -11,6 +11,7 @@ pub mod adapter;
 pub mod batch;
 pub mod ffi;
 pub mod fixture;
+pub mod shell;
 
 pub use adapter::{
     map_ax_error, observation_from_windows, process_alive, AxError, AxWindow, MacAxAdapter,

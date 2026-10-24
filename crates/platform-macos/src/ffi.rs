@@ -131,6 +131,113 @@ extern "C" {
     pub fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> Boolean;
 }
 
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    /// Main display identifier. Safety: no arguments, no state.
+    pub fn CGMainDisplayID() -> u32;
+
+    /// Bounds of a display in global display coordinates (origin at the
+    /// top-left of the main display). Safety: `display` must be a valid
+    /// display identifier.
+    pub fn CGDisplayBounds(display: u32) -> CGRect;
+}
+
+#[link(name = "AppKit", kind = "framework")]
+extern "C" {}
+
+#[link(name = "Foundation", kind = "framework")]
+extern "C" {}
+
+extern "C" {
+    /// Class lookup. Safety: `name` must be a valid NUL-terminated class name.
+    pub fn objc_getClass(name: *const c_char) -> *const c_void;
+
+    /// Selector lookup. Safety: `name` must be a valid NUL-terminated selector.
+    pub fn sel_registerName(name: *const c_char) -> *const c_void;
+
+    /// Objective-C message send with no arguments. The C function is variadic;
+    /// the other arities live in the `objc_msg_send` submodules below because
+    /// Rust rejects redeclaring one symbol with different signatures inside one
+    /// module. Safety: `obj` must be a live object (or null) and `sel` a
+    /// registered selector.
+    pub fn objc_msgSend(obj: *const c_void, sel: *const c_void) -> *const c_void;
+    /// Allocate a class pair for a dynamically registered class. Safety:
+    /// `superclass` must be a live Class and `name` a valid C string.
+    pub fn objc_allocateClassPair(
+        superclass: *const c_void,
+        name: *const c_char,
+        extra_bytes: usize,
+    ) -> *const c_void;
+
+    /// Register a previously allocated class pair. Safety: `class` must be a
+    /// live Class returned by `objc_allocateClassPair`.
+    pub fn objc_registerClassPair(class: *const c_void);
+
+    /// Add a method implementation to a class. Safety: `class` live, `name` a
+    /// registered selector, `imp` a matching implementation, `types` a valid
+    /// Objective-C type encoding for the method.
+    pub fn class_addMethod(
+        class: *const c_void,
+        name: *const c_void,
+        imp: *const c_void,
+        types: *const c_char,
+    ) -> Boolean;
+
+    /// Instantiate a class. Safety: `class` must be a registered Class.
+    pub fn class_createInstance(class: *const c_void, extra_bytes: usize) -> *const c_void;
+}
+
+/// `CGFloat` is `f64` on both supported architectures.
+pub type CGFloat = f64;
+
+/// `NSApplicationActivationPolicyAccessory`: no Dock icon, no menu bar.
+pub const NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY: isize = 1;
+
+/// `NSVariableStatusItemLength` (the item sizes itself to its content).
+pub const NS_VARIABLE_STATUS_ITEM_LENGTH: CGFloat = -1.0;
+
+/// Reserved vertical space at the top of the display for the system menu bar,
+/// in points. `CGDisplayBounds` reports the full display; the adapter does not
+/// query `NSScreen.visibleFrame`, so this documented constant is the only
+/// inset applied.
+pub const K_MENU_BAR_INSET: CGFloat = 30.0;
+
+/// CoreGraphics point. `#[repr(C)]` matches the C layout.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CGPoint {
+    pub x: CGFloat,
+    pub y: CGFloat,
+}
+
+/// CoreGraphics size. `#[repr(C)]` matches the C layout.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CGSize {
+    pub width: CGFloat,
+    pub height: CGFloat,
+}
+
+/// CoreGraphics rectangle. `#[repr(C)]` matches the C layout.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CGRect {
+    pub origin: CGPoint,
+    pub size: CGSize,
+}
+
+impl CGRect {
+    /// Build a `Rect`-like rectangle from origin and size.
+    pub fn rect(&self) -> layout_core::Rect {
+        layout_core::Rect::new(
+            self.origin.x,
+            self.origin.y,
+            self.size.width,
+            self.size.height,
+        )
+    }
+}
+
 /// Build a CFString from a static C string literal (the Rust equivalent of
 /// the SDK's `CFSTR("...")` macros such as kAXWindowsAttribute).
 ///
