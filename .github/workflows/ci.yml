@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    # Pinned, not `macos-latest`: the repo build convention requires
+    # MACOSX_DEPLOYMENT_TARGET=26.0, which needs an SDK 26 host image.
+    # macos-26 is GA for GitHub-hosted runners (since 2026-02-26) and its
+    # Xcode 26 toolchain provides SDK 26; pinning keeps the deployment
+    # target stable when a macOS 27 image appears.
+    runs-on: macos-26
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "26.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # Pinned to the canonical local toolchain (Homebrew rustc 1.98.1)
+          # so CI and the owner's host agree byte-for-byte on `cargo fmt`:
+          # 1.99.1's rustfmt formats macro-arg layout differently (seen on
+          # objc_msg! calls in platform-macos shell.rs:76). Bump this pin
+          # deliberately, together with the local toolchain.
+          toolchain: "1.98.1"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            crates/platform-macos
+
+      - name: fmt
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: tests
+        run: cargo test --workspace
+
+      # platform-macos is NOT a workspace member (it links Apple frameworks
+      # and only builds on macOS), so the steps above never touch it — the
+      # first run verified this: clippy checked layout-core only, tests ran
+      # 27 tests only. Mirror the crate's own documented build convention.
+      - name: fmt (platform-macos)
+        run: cargo fmt --manifest-path crates/platform-macos/Cargo.toml --check
+
+      - name: clippy (platform-macos)
+        run: cargo clippy --manifest-path crates/platform-macos/Cargo.toml --all-targets -- -D warnings
+
+      - name: tests (platform-macos)
+        run: cargo test --manifest-path crates/platform-macos/Cargo.toml
