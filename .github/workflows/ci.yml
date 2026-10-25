@@ -27,6 +27,10 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            crates/platform-macos
 
       - name: fmt
         run: cargo fmt --check
@@ -36,3 +40,16 @@ jobs:
 
       - name: tests
         run: cargo test --workspace
+
+      # platform-macos is NOT a workspace member (it links Apple frameworks
+      # and only builds on macOS), so the steps above never touch it — the
+      # first run verified this: clippy checked layout-core only, tests ran
+      # 27 tests only. Mirror the crate's own documented build convention.
+      - name: fmt (platform-macos)
+        run: cargo fmt --manifest-path crates/platform-macos/Cargo.toml --check
+
+      - name: clippy (platform-macos)
+        run: cargo clippy --manifest-path crates/platform-macos/Cargo.toml --all-targets -- -D warnings
+
+      - name: tests (platform-macos)
+        run: cargo test --manifest-path crates/platform-macos/Cargo.toml
