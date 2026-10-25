@@ -1264,28 +1264,41 @@ enum PreRun {
     Unsafe(String),
 }
 
-fn classify_pre_run() -> PreRun {
-    let path = match crate::config::config_path() {
-        Ok(path) => path,
-        Err(error) => return PreRun::Unsafe(format!("home path unavailable: {error}")),
-    };
-    let mode = match std::fs::metadata(&path) {
-        Ok(meta) => {
-            use std::os::unix::fs::PermissionsExt;
-            meta.permissions().mode() & 0o777
-        }
+fn classify_pre_run_at(
+    path: &std::path::Path,
+    load_config: impl FnOnce() -> Result<Config, ConfigError>,
+) -> PreRun {
+    // `metadata` follows a final symlink. A dangling symlink therefore reports
+    // NotFound and could be mistaken for an absent config, allowing the test's
+    // save/cleanup path to replace and delete the user's symlink. Inspect the
+    // directory entry itself so every symlink is rejected before any writes.
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
         // Missing is a first-class state: the run may write and must restore
         // to no-file at the end.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return PreRun::Missing,
         Err(error) => return PreRun::Unsafe(format!("unreadable: {error}")),
     };
-    match crate::config::Config::load() {
+    if meta.file_type().is_symlink() {
+        return PreRun::Unsafe("config is a symlink".to_string());
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let mode = meta.permissions().mode() & 0o777;
+    match load_config() {
         Ok(config) => PreRun::Valid(config),
-        Err(crate::config::ConfigError::NotOwnerOnly) => PreRun::Unsafe(format!(
-            "not owner-only (mode {mode:o}) or a symlink/foreign uid"
-        )),
+        Err(crate::config::ConfigError::NotOwnerOnly) => {
+            PreRun::Unsafe(format!("not owner-only (mode {mode:o}) or a foreign uid"))
+        }
         Err(error) => PreRun::Unsafe(format!("config invalid: {error}")),
     }
+}
+
+fn classify_pre_run() -> PreRun {
+    let path = match crate::config::config_path() {
+        Ok(path) => path,
+        Err(error) => return PreRun::Unsafe(format!("home path unavailable: {error}")),
+    };
+    classify_pre_run_at(&path, Config::load)
 }
 
 pub fn self_test() -> i32 {
@@ -1559,5 +1572,71 @@ pub fn self_test() -> i32 {
         append_log(&format!("self-test: exit {exit_code}"));
         msg_void(pool, sel("drain"));
         exit_code
+    }
+}
+
+#[cfg(test)]
+mod pre_run_classification_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
+
+    fn scratch_dir() -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "hypr-rust-pre-run-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).expect("create isolated test directory");
+        path
+    }
+
+    #[test]
+    fn missing_path_is_missing_without_loading_config() {
+        let dir = scratch_dir();
+        let path = dir.join("config.json");
+        let result = classify_pre_run_at(&path, || -> Result<Config, ConfigError> {
+            panic!("a missing path must not load config")
+        });
+        assert!(matches!(result, PreRun::Missing));
+        assert!(!path.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_symlink_is_unsafe_and_left_untouched() {
+        use std::os::unix::fs::symlink;
+
+        let dir = scratch_dir();
+        let target = dir.join("target.json");
+        let path = dir.join("config.json");
+        std::fs::write(&target, b"original target").unwrap();
+        symlink(&target, &path).unwrap();
+
+        let result = classify_pre_run_at(&path, || -> Result<Config, ConfigError> {
+            panic!("a symlink must be rejected before loading config")
+        });
+        assert!(matches!(result, PreRun::Unsafe(_)));
+        assert_eq!(std::fs::read_link(&path).unwrap(), target);
+        assert_eq!(std::fs::read(&target).unwrap(), b"original target");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dangling_symlink_is_unsafe_and_left_untouched() {
+        use std::os::unix::fs::symlink;
+
+        let dir = scratch_dir();
+        let target = dir.join("missing-target.json");
+        let path = dir.join("config.json");
+        symlink(&target, &path).unwrap();
+
+        let result = classify_pre_run_at(&path, || -> Result<Config, ConfigError> {
+            panic!("a dangling symlink must not be treated as missing config")
+        });
+        assert!(matches!(result, PreRun::Unsafe(_)));
+        assert_eq!(std::fs::read_link(&path).unwrap(), target);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
