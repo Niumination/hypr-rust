@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    # Pinned, not `macos-latest`: the repo build convention requires
+    # MACOSX_DEPLOYMENT_TARGET=26.0, which needs an SDK 26 host image.
+    # macos-26 is GA for GitHub-hosted runners (since 2026-02-26) and its
+    # Xcode 26 toolchain provides SDK 26; pinning keeps the deployment
+    # target stable when a macOS 27 image appears.
+    runs-on: macos-26
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "26.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: tests
+        run: cargo test --workspace
