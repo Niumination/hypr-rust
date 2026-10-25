@@ -24,6 +24,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          # Pinned to the canonical local toolchain (Homebrew rustc 1.98.1)
+          # so CI and the owner's host agree byte-for-byte on `cargo fmt`:
+          # 1.99.1's rustfmt formats macro-arg layout differently (seen on
+          # objc_msg! calls in platform-macos shell.rs:76). Bump this pin
+          # deliberately, together with the local toolchain.
+          toolchain: "1.98.1"
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
