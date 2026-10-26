@@ -35,8 +35,9 @@ The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md)
 14. [Agent workflow inspired by Karpathy's engineering heuristics](./AGENT-WORKFLOW.md)
 15. [ADR-0004: batch multi-window deferred under strict no-partial requirement](./adr/0004-batch-multiwindow-deferred-no-partial.md) (superseded)
 16. [ADR-0005: batch multi-window accepted with best-effort rollback](./adr/0005-batch-multiwindow-best-effort-rollback.md)
-17. [Capability matrix (per platform / OS build)](./CAPABILITY-MATRIX.md)
-18. [Using ax-shell — operations, configuration and local packaging](./USING-AX-SHELL.md)
+17. [ADR-0006: real-window reflow (all normal windows) with strict no-partial application](./adr/0006-real-window-reflow-strict-no-partial.md)
+18. [Capability matrix (per platform / OS build)](./CAPABILITY-MATRIX.md)
+19. [Using ax-shell — operations, configuration and local packaging](./USING-AX-SHELL.md)
 
 ## Non-goals and important caveats
 
