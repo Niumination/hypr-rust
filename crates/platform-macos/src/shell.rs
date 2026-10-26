@@ -18,9 +18,7 @@ use layout_core::{DisplayId, PlatformSnapshot, Rect, WindowRole};
 
 use crate::adapter::MacAxAdapter;
 use crate::batch;
-use crate::config::{
-    dialog_policy_for, parse_rules_text, rules_json, Config, ConfigError, DialogPolicy, WindowRule,
-};
+use crate::config::{dialog_policy_for, rules_json, Config, ConfigError, DialogPolicy, WindowRule};
 use crate::ffi::{self, CGFloat};
 use crate::{fixture, process_alive};
 
@@ -82,6 +80,7 @@ objc_msg!(msg_window_init(
     backing: i32,
     defer_flag: u8
 ));
+objc_msg!(msg_id_len(idx: usize));
 
 /// Send an Objective-C message with a non-object return type.
 ///
@@ -89,7 +88,7 @@ objc_msg!(msg_window_init(
 macro_rules! objc_msg_ret {
     ($name:ident($($arg:ident : $ty:ty),*) -> $ret:ty) => {
         unsafe fn $name(obj: Id, s: Sel $(, $arg: $ty)*) -> $ret {
-            let f: unsafe extern "C" fn(Id, Sel $(, $arg)*) -> $ret = unsafe {
+            let f: unsafe extern "C" fn(Id, Sel $(, $ty)*) -> $ret = unsafe {
                 std::mem::transmute(ffi::objc_msgSend as unsafe extern "C" fn(Id, Sel) -> Id)
             };
             unsafe { f(obj, s $(, $arg)*) }
@@ -100,6 +99,7 @@ macro_rules! objc_msg_ret {
 objc_msg_ret!(msg_isize() -> isize);
 objc_msg_ret!(msg_u8() -> u8);
 objc_msg_ret!(msg_cstr() -> *const c_char);
+objc_msg_ret!(msg_set_frame(frame: ffi::CGRect) -> ());
 
 /// Send a message with no arguments.
 ///
@@ -164,15 +164,15 @@ struct SettingsPanel {
     ratio: Handle,
     auto_tiling: Handle,
     dialogs: Handle,
-    rules: Handle,
+    rows_area: Handle,
     save: Handle,
 }
 
 // Field layout inside the panel content view (content coordinates, origin at
-// the bottom-left; the title bar sits above). The rules editor sits between
-// the ratio row and the checkboxes; Save saves what is on screen, rules from
-// the editor text.
-const K_SETTINGS_RECTS: [(f64, f64, f64, f64); 15] = [
+// the bottom-left; the title bar sits above). The rules area holds the
+// per-rule rows (bundle entry + policy popup + remove per row); Save saves
+// what is on screen, rules from the rows.
+const K_SETTINGS_RECTS: [(f64, f64, f64, f64); 16] = [
     (16.0, 292.0, 88.0, 20.0),   // label "Layout"
     (110.0, 288.0, 150.0, 24.0), // popup
     (16.0, 260.0, 88.0, 20.0),   // label "Outer gap"
@@ -187,7 +187,8 @@ const K_SETTINGS_RECTS: [(f64, f64, f64, f64); 15] = [
     (190.0, 8.0, 70.0, 22.0),    // Close
     (200.0, 292.0, 120.0, 20.0), // label "changes on Save"
     (16.0, 170.0, 190.0, 18.0),  // label "Rules (JSON array)"
-    (16.0, 66.0, 308.0, 96.0),   // rules text view
+    (16.0, 66.0, 308.0, 96.0),   // rules row area
+    (210.0, 166.0, 100.0, 22.0), // Add rule
 ];
 
 /// Handle kinds for [`create_settings_panel`].
@@ -226,6 +227,39 @@ static STATE: Mutex<ShellState> = Mutex::new(ShellState {
     settings: None,
     status: String::new(),
 });
+
+/// One interactive rules row in the settings panel: the row's host view, its
+/// entry (an editable combo for bundle rows; a read-only label for pid rules,
+/// which only a JSON file can express), the dialog-policy popup and the
+/// row's remove button (identified by pointer, not by an integer tag, so no
+/// re-tagging is needed when rows shift). `pid` records the pid the row
+/// round-trips for pid rows.
+#[derive(Clone, Copy)]
+struct RuleRow {
+    view: Handle,
+    entry: Handle,
+    policy: Handle,
+    remove: Handle,
+    pid: Option<u32>,
+}
+
+/// Row state lives outside `ShellState` so panel code (populate, add,
+/// remove, save) can read it without re-entrant locks. Lock order is fixed
+/// everywhere: `STATE` strictly before `RULE_ROWS`, never the reverse.
+static RULE_ROWS: Mutex<Vec<RuleRow>> = Mutex::new(Vec::new());
+
+/// Policy popup items, in display order.
+const K_POLICY_ITEMS: [&str; 3] = ["include", "exclude", "default"];
+
+/// The dialog policy a popup title maps to. Anything unrecognised — including
+/// no selection — stays on the conservative default.
+fn policy_from_title(title: Option<&str>) -> DialogPolicy {
+    match title {
+        Some("include") => DialogPolicy::Include,
+        Some("exclude") => DialogPolicy::Exclude,
+        _ => DialogPolicy::Default,
+    }
+}
 
 /// The loaded config, or the defaults before one is loaded.
 fn current_config() -> Config {
@@ -284,8 +318,7 @@ fn save_settings_from_panel() {
         }
     };
     // SAFETY: the panel handles are live AppKit objects on the main thread.
-    let (popup, outer, inner, ratio, auto, dialogs, rules_text) = unsafe {
-        let rules_text = rules_view_text(panel.rules);
+    let (popup, outer, inner, ratio, auto, dialogs) = unsafe {
         (
             popup_title(panel.popup),
             field_text(panel.outer),
@@ -293,21 +326,16 @@ fn save_settings_from_panel() {
             field_text(panel.ratio),
             checkbox_on(panel.auto_tiling),
             checkbox_on(panel.dialogs),
-            rules_text,
         )
     };
-    // The rules editor is authoritative for rules: the typed text must parse
-    // as a valid rules list (the same entry validation a file load runs), and
-    // only the canonical regenerated JSON is embedded — raw editor text never
-    // reaches the body, so a typed quote cannot break the JSON structure.
-    let rules = match parse_rules_text(&rules_text) {
-        Ok(rules) => rules,
-        Err(error) => {
-            set_status(&format!("settings invalid: rules ({error})"));
-            refresh_menu();
-            return;
-        }
-    };
+    // The rows are the authority for rules: the panel saves only the
+    // canonical regenerated JSON built from them — raw entry text never
+    // reaches the body, and the final `Config::from_json` validation (the
+    // same entry validation a file load runs) rejects a matcher-less row, so
+    // a row can never silently match every app.
+    // SAFETY: the rows hold live AppKit handles; main thread (the save path
+    // runs only from the button action, the self-test or the proof).
+    let rules = unsafe { rules_from_rows() };
     let body = settings_body(
         popup.as_deref().unwrap_or(""),
         &outer,
@@ -344,9 +372,10 @@ fn show_settings() {
     let panel = state.settings.unwrap();
     let config = state.config.clone().unwrap_or_default();
     let app = state.app;
+    let target = state.target.0;
     // SAFETY: main-thread calls on live handles; populate before showing.
     unsafe {
-        populate_settings(panel, &config);
+        populate_settings(panel, &config, target);
         if !app.is_null() {
             msg_bool(app.0, sel("activateIgnoringOtherApps:"), true);
         }
@@ -542,8 +571,9 @@ unsafe fn app_bundle_id(pid: u32) -> Option<String> {
 
 /// Populate the panel from `config`.
 ///
-/// SAFETY: the panel handles must be live AppKit objects.
-unsafe fn populate_settings(panel: SettingsPanel, config: &Config) {
+/// SAFETY: the panel handles must be live AppKit objects; the caller holds
+/// `STATE` (this function locks only `RULE_ROWS`, strictly after it).
+unsafe fn populate_settings(panel: SettingsPanel, config: &Config, target: Id) {
     unsafe {
         select_popup_title(panel.popup, config.kind_name());
         set_field_text(panel.outer, &fmt_num(config.layout.outer_gap));
@@ -551,9 +581,10 @@ unsafe fn populate_settings(panel: SettingsPanel, config: &Config) {
         set_field_text(panel.ratio, &fmt_num(config.layout.master_ratio));
         set_checkbox(panel.auto_tiling, config.auto_tiling);
         set_checkbox(panel.dialogs, config.include_dialogs);
-        // The editor shows the canonical JSON of the effective rules; Save
-        // re-validates whatever the user typed there.
-        set_rules_text(panel.rules, &rules_json(&config.rules));
+        // The rows are the authority for rules: every open rebuilds them from
+        // the effective config; Save re-validates whatever the rows hold (the
+        // same entry validation a file load runs).
+        rebuild_rules_rows(panel.rows_area, &config.rules, target);
     }
 }
 
@@ -616,9 +647,17 @@ unsafe fn create_settings_panel(target: Id) -> SettingsPanel {
         make_label(content, K_SETTINGS_RECTS[6], "Master ratio");
         make_label(content, K_SETTINGS_RECTS[12], "changes on Save");
 
-        // Rules editor: a scrollable plain-text view holding the JSON array.
-        make_label(content, K_SETTINGS_RECTS[13], "Rules (JSON array)");
-        let rules = make_rules_text(content, K_SETTINGS_RECTS[14]);
+        // Rules rows: a scrollable area (one row per rule: bundle entry +
+        // policy popup + remove) plus the Add-rule button.
+        make_label(content, K_SETTINGS_RECTS[13], "Rules");
+        let rows_area = make_row_area(content, K_SETTINGS_RECTS[14]);
+        let _add_rule = make_button(
+            content,
+            K_SETTINGS_RECTS[15],
+            "Add rule",
+            target,
+            "addRule:",
+        );
 
         // Save / Close: the window retains them; the actions live on `target`.
         let save = make_button(
@@ -644,9 +683,333 @@ unsafe fn create_settings_panel(target: Id) -> SettingsPanel {
             ratio,
             auto_tiling,
             dialogs,
-            rules,
+            rows_area,
             save,
         }
+    }
+}
+
+// MARK: - Rules rows (per-rule editor)
+
+/// The title a dialog policy shows as the policy popup item.
+fn policy_title(policy: DialogPolicy) -> &'static str {
+    match policy {
+        DialogPolicy::Include => "include",
+        DialogPolicy::Exclude => "exclude",
+        DialogPolicy::Default => "default",
+    }
+}
+
+/// Bundle ids of currently running apps, for the bundle entries' completion
+/// list. Only `bundleIdentifier`s are read — never window titles.
+fn running_bundle_ids() -> Vec<String> {
+    unsafe {
+        let workspace = msg0(class("NSWorkspace"), sel("sharedWorkspace"));
+        let apps = msg0(workspace, sel("runningApplications"));
+        if apps.is_null() {
+            return Vec::new();
+        }
+        let count = msg_isize(apps, sel("count"));
+        let mut ids = Vec::new();
+        for index in 0..count.max(0) {
+            let app = msg_id_len(apps, sel("objectAtIndex:"), index as usize);
+            if app.is_null() {
+                continue;
+            }
+            let bundle = msg0(app, sel("bundleIdentifier"));
+            if bundle.is_null() {
+                continue;
+            }
+            ids.push(utf8_string(bundle));
+        }
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+}
+
+/// Build the scrollable rules area and return its document view handle (one
+/// row per rule is laid out inside it; the scroll view itself is retained by
+/// the window — the same recipe the old text editor used).
+///
+/// SAFETY: main thread; `content` must be a live view.
+unsafe fn make_row_area(content: Id, place: (f64, f64, f64, f64)) -> Handle {
+    unsafe {
+        let scroll = {
+            let alloc = msg0(class("NSScrollView"), sel("alloc"));
+            let scroll = msg_view_init(alloc, sel("initWithFrame:"), rect(place));
+            msg_bool(scroll, sel("setHasVerticalScroller:"), true);
+            msg_bool(scroll, sel("setAutohidesScrollers:"), true);
+            scroll
+        };
+        let doc = {
+            let alloc = msg0(class("NSView"), sel("alloc"));
+            msg_view_init(alloc, sel("initWithFrame:"), rect((0.0, 0.0, 308.0, 96.0)))
+        };
+        msg_void_id(scroll, sel("setDocumentView:"), doc);
+        msg_void_id(content, sel("addSubview:"), scroll);
+        Handle(doc)
+    }
+}
+
+/// Build one rules row and add it to `doc` at `y` (bottom-left origin,
+/// matching the panel's coordinate convention). A bundle row gets an editable
+/// combo seeded with the running apps' bundle ids; a pid row gets a read-only
+/// label (pid rules can only come from a JSON file) and round-trips its pid.
+///
+/// SAFETY: main thread; `doc` and `target` must be live.
+unsafe fn make_rule_row(
+    doc: Id,
+    y: f64,
+    pid: Option<u32>,
+    bundle: Option<&str>,
+    policy: DialogPolicy,
+    target: Id,
+    suggestions: &[String],
+) -> RuleRow {
+    unsafe {
+        let view = {
+            let alloc = msg0(class("NSView"), sel("alloc"));
+            msg_view_init(alloc, sel("initWithFrame:"), rect((0.0, y, 308.0, 22.0)))
+        };
+        // A pid row is a read-only label (pid rules can only come from a
+        // JSON file); a bundle row is an editable combo seeded with the
+        // running apps' bundle ids.
+        let entry = if let Some(shown_pid) = pid {
+            let label = {
+                let alloc = msg0(class("NSTextField"), sel("alloc"));
+                let label =
+                    msg_view_init(alloc, sel("initWithFrame:"), rect((0.0, 0.0, 170.0, 22.0)));
+                msg_bool(label, sel("setEditable:"), false);
+                msg_bool(label, sel("setBordered:"), false);
+                msg_bool(label, sel("setDrawsBackground:"), false);
+                label
+            };
+            msg_void_id(
+                label,
+                sel("setStringValue:"),
+                nsstring(&format!("pid {shown_pid} (from file)")),
+            );
+            label
+        } else {
+            let combo = {
+                let alloc = msg0(class("NSComboBox"), sel("alloc"));
+                let combo =
+                    msg_view_init(alloc, sel("initWithFrame:"), rect((0.0, 0.0, 170.0, 22.0)));
+                msg_bool(combo, sel("setUsesDataSource:"), false);
+                for suggestion in suggestions {
+                    msg_void_id(combo, sel("addItemWithObjectValue:"), nsstring(suggestion));
+                }
+                combo
+            };
+            if let Some(bundle_id) = bundle {
+                msg_void_id(combo, sel("setStringValue:"), nsstring(bundle_id));
+            }
+            combo
+        };
+        msg_void_id(view, sel("addSubview:"), entry);
+        let policy_popup = {
+            let alloc = msg0(class("NSPopUpButton"), sel("alloc"));
+            msg_popup_init(
+                alloc,
+                sel("initWithFrame:pullsDown:"),
+                rect((176.0, 0.0, 90.0, 22.0)),
+                false,
+            )
+        };
+        for item in K_POLICY_ITEMS {
+            msg_void_id(policy_popup, sel("addItemWithTitle:"), nsstring(item));
+        }
+        msg_void_id(
+            policy_popup,
+            sel("selectItemWithTitle:"),
+            nsstring(policy_title(policy)),
+        );
+        msg_void_id(view, sel("addSubview:"), policy_popup);
+        let remove = make_button(view, (272.0, 0.0, 26.0, 22.0), "–", target, "removeRule:");
+        msg_void_id(doc, sel("addSubview:"), view);
+        RuleRow {
+            view: Handle(view),
+            entry: Handle(entry),
+            policy: Handle(policy_popup),
+            remove,
+            pid,
+        }
+    }
+}
+
+/// Replace the rule rows with one row per effective rule.
+///
+/// SAFETY: main thread; live handles; the caller holds `STATE` (this
+/// function locks only `RULE_ROWS`, strictly after it).
+unsafe fn rebuild_rules_rows(doc: Handle, rules: &[crate::config::WindowRule], target: Id) {
+    let suggestions = running_bundle_ids();
+    let old = RULE_ROWS.lock().unwrap().split_off(0);
+    for row in old {
+        msg_void(row.view.0, sel("removeFromSuperview"));
+    }
+    let mut rows = Vec::new();
+    for rule in rules {
+        rows.push(make_rule_row(
+            doc.0,
+            0.0,
+            rule.pid,
+            rule.bundle.as_deref(),
+            rule.dialogs,
+            target,
+            &suggestions,
+        ));
+    }
+    *RULE_ROWS.lock().unwrap() = rows;
+    relayout_rules_rows(doc);
+}
+
+/// Lay the rows out top-down and size the document view to fit (the panel
+/// shows 96 pt of rules; more rows scroll).
+///
+/// SAFETY: main thread; `doc` and the row handles are live.
+unsafe fn relayout_rules_rows(doc: Handle) {
+    let rows = RULE_ROWS.lock().unwrap();
+    let height = std::cmp::max(96, rows.len() * 26) as f64;
+    msg_set_frame(doc.0, sel("setFrame:"), rect((0.0, 0.0, 308.0, height)));
+    for (index, row) in rows.iter().enumerate() {
+        let y = height - 22.0 - (index as f64) * 26.0;
+        msg_set_frame(row.view.0, sel("setFrame:"), rect((0.0, y, 308.0, 22.0)));
+    }
+}
+
+/// Read the rules the rows currently express. A bundle row contributes its
+/// entry text as the bundle (empty text = no matcher); a pid row round-trips
+/// its pid unchanged. A row with neither matcher has no bundle and no pid —
+/// the final `Config::from_json` validation rejects it (fail closed).
+///
+/// SAFETY: main thread; the row handles are live.
+unsafe fn rules_from_rows() -> Vec<crate::config::WindowRule> {
+    let rows = RULE_ROWS.lock().unwrap();
+    let mut rules = Vec::with_capacity(rows.len());
+    for row in rows.iter() {
+        let bundle = if row.pid.is_none() {
+            match field_text(row.entry).trim() {
+                "" => None,
+                bundle_id => Some(bundle_id.to_string()),
+            }
+        } else {
+            None
+        };
+        rules.push(crate::config::WindowRule {
+            bundle,
+            pid: row.pid,
+            dialogs: policy_from_title(popup_title(row.policy).as_deref()),
+        });
+    }
+    rules
+}
+
+/// Add one empty bundle row — the Add-rule action's code path, also used by
+/// the self-test and the panel proof. Returns whether a row was added.
+fn add_rule_row() -> bool {
+    let doc_target = {
+        let state = STATE.lock().unwrap();
+        state.settings.map(|panel| (panel.rows_area, state.target))
+    };
+    match doc_target {
+        None => false,
+        Some((doc, target)) => {
+            let suggestions = running_bundle_ids();
+            // SAFETY: main thread; both handles are live.
+            let row = unsafe {
+                make_rule_row(
+                    doc.0,
+                    0.0,
+                    None,
+                    None,
+                    DialogPolicy::Default,
+                    target.0,
+                    &suggestions,
+                )
+            };
+            RULE_ROWS.lock().unwrap().push(row);
+            // SAFETY: main thread; `doc` is live.
+            unsafe { relayout_rules_rows(doc) };
+            true
+        }
+    }
+}
+
+/// Add one pid rule row (a read-only label round-trips the pid; pid rules can
+/// only come from a JSON file). Used by the self-test so the pid round-trip is
+/// exercised at the row surface too. Returns whether a row was added.
+fn add_pid_rule_row(pid: u32) -> bool {
+    let doc_target = {
+        let state = STATE.lock().unwrap();
+        state.settings.map(|panel| (panel.rows_area, state.target))
+    };
+    match doc_target {
+        None => false,
+        Some((doc, target)) => {
+            // SAFETY: main thread; both handles are live. The suggestions are
+            // unused on a pid row.
+            let row = unsafe {
+                make_rule_row(
+                    doc.0,
+                    0.0,
+                    Some(pid),
+                    None,
+                    DialogPolicy::Include,
+                    target.0,
+                    &[],
+                )
+            };
+            RULE_ROWS.lock().unwrap().push(row);
+            // SAFETY: main thread; `doc` is live.
+            unsafe { relayout_rules_rows(doc) };
+            true
+        }
+    }
+}
+
+/// Remove the row whose remove button is `sender` (pointer identity). This is
+/// the remove button's action code path.
+fn remove_rule_row(sender: Id) -> bool {
+    let doc = {
+        let state = STATE.lock().unwrap();
+        state.settings.map(|panel| panel.rows_area)
+    };
+    let Some(doc) = doc else {
+        return false;
+    };
+    let removed = {
+        let mut rows = RULE_ROWS.lock().unwrap();
+        rows.iter()
+            .position(|row| row.remove.0 == sender)
+            .map(|index| rows.remove(index))
+    };
+    let Some(row) = removed else {
+        return false;
+    };
+    {
+        let count = RULE_ROWS.lock().unwrap().len();
+        append_log(&format!("panel: rules row removed (rows={count} left)"));
+    }
+    // SAFETY: main thread; `doc` is live.
+    unsafe { msg_void(row.view.0, sel("removeFromSuperview")) };
+    unsafe { relayout_rules_rows(doc) };
+    true
+}
+
+extern "C" fn action_add_rule(_this: Id, _cmd: Sel) {
+    if add_rule_row() {
+        set_status("rules row added");
+    } else {
+        set_status("rules row add ignored (panel unavailable)");
+    }
+}
+
+extern "C" fn action_remove_rule(_this: Id, _cmd: Sel, sender: Id) {
+    if remove_rule_row(sender) {
+        set_status("rules row removed");
+    } else {
+        set_status("rules row remove ignored (unknown row)");
     }
 }
 
@@ -736,58 +1099,6 @@ unsafe fn make_label(content: Id, place: (f64, f64, f64, f64), title: &str) {
         msg_void_id(label, sel("setStringValue:"), nsstring(title));
         msg_void_id(content, sel("addSubview:"), label);
     }
-}
-
-/// Allocate a scrollable plain-text view for the rules JSON editor and add it
-/// to `content`. Returns the text view handle (the scroll view is discarded —
-/// the window retains it).
-///
-/// SAFETY: main thread; `content` must be a live view.
-unsafe fn make_rules_text(content: Id, place: (f64, f64, f64, f64)) -> Handle {
-    // SAFETY: documented initialisers; the classic vertically-resizable text
-    // view inside a scroll view recipe, all documented selectors.
-    let text = unsafe {
-        let scroll = {
-            let alloc = msg0(class("NSScrollView"), sel("alloc"));
-            let scroll = msg_view_init(alloc, sel("initWithFrame:"), rect(place));
-            msg_bool(scroll, sel("setHasVerticalScroller:"), true);
-            msg_bool(scroll, sel("setAutohidesScrollers:"), true);
-            scroll
-        };
-        let text = {
-            let alloc = msg0(class("NSTextView"), sel("alloc"));
-            let text = msg_view_init(alloc, sel("initWithFrame:"), rect(place));
-            msg_bool(text, sel("setRichText:"), false);
-            msg_bool(text, sel("setEditable:"), true);
-            msg_bool(text, sel("setVerticallyResizable:"), true);
-            msg_bool(text, sel("setHorizontallyResizable:"), false);
-            msg_int(text, sel("setAutoresizingMask:"), 16);
-            // The container width follows the text view, so the editor wraps
-            // at the panel width; growth is vertical only.
-            let container = msg0(text, sel("textContainer"));
-            msg_bool(container, sel("setWidthTracksTextView:"), true);
-            text
-        };
-        msg_void_id(scroll, sel("setDocumentView:"), text);
-        msg_void_id(content, sel("addSubview:"), scroll);
-        text
-    };
-    Handle(text)
-}
-
-/// Replace the rules editor's text.
-///
-/// SAFETY: `view` must be a live NSTextView.
-unsafe fn set_rules_text(view: Handle, text: &str) {
-    unsafe { msg_void_id(view.0, sel("setString:"), nsstring(text)) };
-}
-
-/// Text of the rules editor.
-///
-/// SAFETY: `view` must be a live NSTextView.
-unsafe fn rules_view_text(view: Handle) -> String {
-    let value = unsafe { msg0(view.0, sel("string")) };
-    unsafe { utf8_string(value) }
 }
 
 // MARK: - Menu construction
@@ -1111,10 +1422,19 @@ fn imp(f: extern "C" fn(Id, Sel)) -> *const std::os::raw::c_void {
     f as usize as *const std::os::raw::c_void
 }
 
+/// Cast an `extern "C" fn(Id, Sel, Id)` implementation — an action that
+/// receives one object argument (the sending control) — to an IMP.
+#[allow(clippy::fn_to_numeric_cast)]
+fn imp3(f: extern "C" fn(Id, Sel, Id)) -> *const std::os::raw::c_void {
+    f as usize as *const std::os::raw::c_void
+}
+
 /// Register the action-target class and return one instance.
 ///
 /// SAFETY: each `class_addMethod` pairs a registered selector with an
-/// `extern "C" fn(Id, Sel)` implementation, encoded `v@:`.
+/// implementation matching its encoding: `v@:` for the two-argument actions
+/// and `v@:@` for `removeRule:`, which takes the sending control as its
+/// third argument.
 unsafe fn create_target() -> Id {
     let superclass = class("NSObject");
     let name = b"HyprRustShell\0";
@@ -1122,6 +1442,7 @@ unsafe fn create_target() -> Id {
     let cls = unsafe { ffi::objc_allocateClassPair(superclass, name.as_ptr() as *const c_char, 0) };
     assert!(!cls.is_null(), "failed to allocate the HyprRustShell class");
     let types = b"v@:\0";
+    let sender_types = b"v@:@\0";
     // SAFETY: the selectors are registered above and the implementations match
     // the `v@:` encoding.
     unsafe {
@@ -1172,6 +1493,20 @@ unsafe fn create_target() -> Id {
             sel("quit:"),
             imp(action_quit),
             types.as_ptr() as *const c_char,
+        );
+        // Per-row rules actions: `addRule:` takes no extra argument;
+        // `removeRule:` receives the row's remove button as the sender.
+        ffi::class_addMethod(
+            cls,
+            sel("addRule:"),
+            imp(action_add_rule),
+            types.as_ptr() as *const c_char,
+        );
+        ffi::class_addMethod(
+            cls,
+            sel("removeRule:"),
+            imp3(action_remove_rule),
+            sender_types.as_ptr() as *const c_char,
         );
         ffi::objc_registerClassPair(cls);
     }
@@ -1429,11 +1764,12 @@ pub fn self_test() -> i32 {
             append_log("self-test: no live fixture — rules exercise skipped");
         }
 
-        // Settings panel + rules editor: open through the same path the menu
-        // action uses, read the controls back, save through the Save button's
-        // own helper, prove invalid input is refused, then restore defaults
-        // for the next run. A seeded rule is in place before the panel opens,
-        // so the editor displays it and a save round-trips it.
+        // Settings panel + per-row rules editor: open through the same path
+        // the menu action uses, read the controls and the rule rows back,
+        // save through the Save button's own helper, prove invalid input is
+        // refused, then restore defaults for the next run. A seeded rule is
+        // in place before the panel opens, so the rows display it and a save
+        // round-trips it.
         let mut seeded = Config::load().unwrap_or_default();
         seeded.rules.push(WindowRule {
             bundle: Some("com.example.seeded".to_string()),
@@ -1452,10 +1788,30 @@ pub fn self_test() -> i32 {
                 field_text(panel.ratio),
             );
             let (auto, dialogs) = (checkbox_on(panel.auto_tiling), checkbox_on(panel.dialogs));
-            let rules_text = rules_view_text(panel.rules);
+            // The rows are the editor surface: log the row count and what the
+            // first row shows (the entry text for a bundle row, the read-only
+            // pid label for a pid row) plus its policy title.
+            let (rows_count, first_row) = {
+                let rows = RULE_ROWS.lock().unwrap();
+                let count = rows.len();
+                // SAFETY: within self_test's enclosing unsafe block; live
+                // row handles.
+                let first = rows.first().map(|row| {
+                    if let Some(pid) = row.pid {
+                        format!("pid {pid} (from file) policy={:?}", popup_title(row.policy))
+                    } else {
+                        format!(
+                            "bundle entry={:?} policy={:?}",
+                            field_text(row.entry),
+                            popup_title(row.policy)
+                        )
+                    }
+                });
+                (count, first)
+            };
             let visible = msg_u8(panel.window.0, sel("isVisible"));
             append_log(&format!(
-                "self-test: panel visible={visible} popup={popup:?} outer={outer} inner={inner} ratio={ratio} auto={auto} dialogs={dialogs} rules={rules_text}"
+                "self-test: panel visible={visible} popup={popup:?} outer={outer} inner={inner} ratio={ratio} auto={auto} dialogs={dialogs} rows={rows_count} first-row={first_row:?}"
             ));
             // 1) A valid custom value saved through the Save button's code
             // path; the seeded rule round-trips through the editor.
@@ -1482,39 +1838,49 @@ pub fn self_test() -> i32 {
                 "self-test: invalid save status = {}",
                 STATE.lock().unwrap().status.clone()
             ));
-            // 3) Rules edited in the editor: a pid rule replaces the seeded
-            // one (text in, entry validation, canonical text out).
+            // 3) Rules edited at the row level: the seeded bundle row is
+            // replaced by a pid row (fixture-bound; the read-only label
+            // round-trips the pid) or a bundle row typed at the row surface;
+            // both with the include dialog policy.
             set_field_text(panel.ratio, "0.7");
-            if let Some(pid) = fixture::registered_fixture_pid().filter(|pid| process_alive(*pid)) {
-                set_rules_text(
-                    panel.rules,
-                    &format!(r#"[{{"pid": {pid}, "dialogs": "include"}}]"#),
-                );
+            let target = STATE.lock().unwrap().target.0;
+            rebuild_rules_rows(panel.rows_area, &[], target);
+            let round3 = if let Some(pid) =
+                fixture::registered_fixture_pid().filter(|pid| process_alive(*pid))
+            {
+                add_pid_rule_row(pid);
+                format!("pid {pid} include")
             } else {
-                set_rules_text(
-                    panel.rules,
-                    r#"[{"bundle": "com.example.edited", "dialogs": "include"}]"#,
-                );
-            }
+                if add_rule_row() {
+                    let row = RULE_ROWS.lock().unwrap()[0];
+                    set_field_text(row.entry, "com.example.edited");
+                    select_popup_title(row.policy, "include");
+                } else {
+                    append_log("self-test: add-rule row unavailable (row edit skipped)");
+                }
+                "com.example.edited include".to_string()
+            };
             save_settings_from_panel();
             append_log(&format!(
-                "self-test: rules edit save status = {}",
+                "self-test: rules edit ({round3}) save status = {}",
                 STATE.lock().unwrap().status.clone()
             ));
             append_log(&format!(
                 "self-test: loaded after rules edit = {:?}",
                 Config::load()
             ));
-            // 4) Broken rules text is refused; the file keeps the last saved
-            // rules list.
-            set_rules_text(panel.rules, r#"[{"pid": 1"#);
+            // 4) A matcher-less row is refused: the added empty bundle row has
+            // neither bundle nor pid, and the final from_json validation (the
+            // same entry validation a file load runs) rejects it; the file
+            // keeps the last saved rules list.
+            add_rule_row();
             save_settings_from_panel();
             append_log(&format!(
-                "self-test: broken rules save status = {}",
+                "self-test: matcher-less save status = {}",
                 STATE.lock().unwrap().status.clone()
             ));
             append_log(&format!(
-                "self-test: loaded after broken rules = {:?}",
+                "self-test: loaded after matcher-less = {:?}",
                 Config::load().map(|config| config.rules)
             ));
             // 5) Final exercise of the reset action's own code path.
@@ -1654,27 +2020,33 @@ pub fn panel_click_proof() -> i32 {
             msg_u8(panel.window.0, sel("isVisible")) != 0
         ));
 
-        // Round 1: broken rules text + a Save click must be refused and leave
-        // the (absent) config file absent.
-        set_rules_text(panel.rules, r#"[{"pid": 1"#);
+        // Round 1: an empty row (no matcher) + a Save click must be refused
+        // and leave the (absent) config file absent.
+        add_rule_row();
+        let rows1 = RULE_ROWS.lock().unwrap().len();
         msg_void_id(panel.save.0, sel("performClick:"), std::ptr::null_mut());
         let status1 = STATE.lock().unwrap().status.clone();
         let absent1 = !path.exists();
         append_log(&format!(
-            "panel click proof: invalid round status={status1:?} file_absent={absent1}"
+            "panel click proof: invalid round rows={rows1} status={status1:?} file_absent={absent1}"
         ));
-        let ok1 = status1.starts_with("settings invalid: rules (") && absent1;
+        // The message surfaces from the final from_json validation; match its
+        // stable prefix, not a per-rule detail wording.
+        let ok1 = rows1 == 1 && status1.starts_with("settings invalid:") && absent1;
 
-        // Round 2: valid rules text + a Save click must save the canonical
-        // body (one bundle rule) with owner-only 0600.
-        set_rules_text(
-            panel.rules,
-            r#"[{"bundle": "com.example.proof", "dialogs": "exclude"}]"#,
-        );
+        // Round 2: fill the row at the row surface (bundle id + the exclude
+        // policy) + a Save click must save the canonical body (one bundle
+        // rule) with owner-only 0600.
+        {
+            let row = RULE_ROWS.lock().unwrap()[0];
+            set_field_text(row.entry, "com.example.proof");
+            select_popup_title(row.policy, "exclude");
+        }
         msg_void_id(panel.save.0, sel("performClick:"), std::ptr::null_mut());
         let status2 = STATE.lock().unwrap().status.clone();
         append_log(&format!(
-            "panel click proof: valid round status={status2:?}"
+            "panel click proof: valid round rows={} status={status2:?}",
+            RULE_ROWS.lock().unwrap().len()
         ));
         let (ok2, detail) = match Config::load() {
             Ok(config) => {
@@ -1683,7 +2055,8 @@ pub fn panel_click_proof() -> i32 {
                     .map(|meta| meta.permissions().mode() & 0o777)
                     .unwrap_or(0);
                 let rules_ok = config.rules.len() == 1
-                    && config.rules[0].bundle.as_deref() == Some("com.example.proof");
+                    && config.rules[0].bundle.as_deref() == Some("com.example.proof")
+                    && config.rules[0].dialogs == DialogPolicy::Exclude;
                 let mode_ok = crate::config::is_owner_only_mode(mode);
                 (
                     status2 == "settings saved" && rules_ok && mode_ok,
