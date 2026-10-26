@@ -380,6 +380,12 @@ fn save_settings_from_panel() {
             }
         },
         Err(error) => {
+            // A parse failure means the generated body itself is malformed;
+            // record it verbatim (numbers/bools/rule matchers only — no
+            // titles) so the exact shape is diagnosable from the log.
+            if matches!(error, ConfigError::Parse) {
+                append_log(&format!("settings body (malformed): {body}"));
+            }
             set_settings_status(panel, &format!("settings invalid: {error}"));
         }
     }
@@ -2110,6 +2116,41 @@ pub fn panel_click_proof() -> i32 {
             msg_u8(panel.window.0, sel("isVisible")) != 0
         ));
 
+        // Round 0: the owner's first-run scenario — a fresh panel with ZERO
+        // rule rows and only the number fields edited (0.35 / 40) must save
+        // through the real click dispatch. The run-created file is then
+        // removed so Round 1's absent-file guard stays meaningful.
+        set_field_text(panel.outer, "40");
+        set_field_text(panel.ratio, "0.35");
+        msg_void_id(panel.save.0, sel("performClick:"), std::ptr::null_mut());
+        let status0 = STATE.lock().unwrap().status.clone();
+        let label0 = field_text(panel.status);
+        append_log(&format!(
+            "panel click proof: zero-row save status={status0:?} label={label0:?}"
+        ));
+        let (ok0, detail0) = match Config::load() {
+            Ok(config) => {
+                let values_ok = config.layout.outer_gap == 40.0
+                    && config.layout.inner_gap == 8.0
+                    && config.layout.master_ratio == 0.35;
+                (
+                    status0 == "settings saved" && label0 == status0 && values_ok,
+                    format!("status={status0:?} label={label0:?} values_ok={values_ok}"),
+                )
+            }
+            Err(error) => (false, format!("load failed: {error}")),
+        };
+        append_log(&format!("panel click proof: zero-row round {detail0}"));
+        let removed0 = match std::fs::remove_file(&path) {
+            Ok(()) => true,
+            Err(error) => {
+                append_log(&format!(
+                    "panel click proof: zero-row cleanup failed: {error}"
+                ));
+                false
+            }
+        };
+
         // Round 1: an empty row (no matcher) + a Save click must be refused
         // and leave the (absent) config file absent.
         add_rule_row();
@@ -2136,7 +2177,7 @@ pub fn panel_click_proof() -> i32 {
         append_log(&format!(
             "panel click proof: comma round status={status1b:?} label={label1b:?} file_absent={absent1b}"
         ));
-        set_field_text(panel.ratio, "0.55");
+        set_field_text(panel.ratio, "0.35");
         // Match the field-named prefix, not the exact suggestion wording.
         let ok1b = status1b.starts_with("invalid number in master_ratio:")
             && label1b == status1b
@@ -2192,7 +2233,7 @@ pub fn panel_click_proof() -> i32 {
                 false
             }
         };
-        let exit_code = if ok1 && ok1b && ok2 && cleaned {
+        let exit_code = if ok0 && removed0 && ok1 && ok1b && ok2 && cleaned {
             K_SELF_TEST_EXIT_OK
         } else {
             K_SELF_TEST_EXIT_RESTORE_FAILED
