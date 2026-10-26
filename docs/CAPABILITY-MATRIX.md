@@ -13,7 +13,7 @@ PRD requirement ("publish a capability matrix per platform/OS build; do not clai
 | Read-only enumeration/geometry probe | PASS (read-only; not control evidence) | [PLATFORM-SPIKES](./PLATFORM-SPIKES.md) windows section |
 | Accessibility permission denial path | PASS one launchd context (exit 3) | 2026-10-23 runtime test, ARENA §6 caveat |
 | Menu-bar shell: status, reflow, pause, diagnostics, quit | PASS | ARENA Path J / host run 2026-10-24 |
-| Settings panel + **row-based rules editor** (Save canonical JSON; click-path `performClick:` proof) | PASS | Paths J → L → M |
+| Settings panel + **row-based rules editor** (Save canonical JSON; click-path `performClick:` proof; per-field number validation + in-panel status line) | PASS | Paths J → L → M |
 | Reflow on two fixture windows (master-stack/columns) | PASS fixture-bound | ARENA Path K/L/M self-tests |
 | Config safety (owner-only 0600, symlink rejection, fail-closed classification) | PASS 4-case + 2-case hosts | ARENA Jalur K addendum 2026-10-25 |
 | **Spaces / native workspaces (macOS)** | **DISABLED** — requirements not proven on this build; no private WindowServer use | [ADR-0003](./adr/0003-native-workspaces.md) |
