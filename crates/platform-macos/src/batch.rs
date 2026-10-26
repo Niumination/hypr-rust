@@ -8,6 +8,15 @@
 //! claims atomicity. A failed batch can therefore leave a partial state; the
 //! report says so via `rollback_all_restored == false`.
 //!
+//! Two entry points share this seam:
+//!
+//! - [`apply_batch`] — the ADR-0005 best-effort path, the unchanged status quo
+//!   for the fixture-bound `Reflow:` path (interleaved read/write).
+//! - [`apply_batch_strict`] — the ADR-0006 strict no-partial path for real
+//!   windows: a full read preflight before the first write (any read failure
+//!   refuses with zero writes), verified writes, full rollback, and the
+//!   honest three-way [`StrictStatus`] verdict.
+//!
 //! The module is pure with respect to the injected [`BatchOps`] seam: the real
 //! adapter implements it with AX, and unit tests implement it with scripted
 //! outcomes so the rollback contract is verified without a Mac.
@@ -167,6 +176,117 @@ fn finish<O: BatchOps>(
         failed_at: Some(failed_at),
         error: Some(error),
         rollback_all_restored: all_restored,
+    }
+}
+
+/// Honest three-way verdict of a strict batch (ADR-0006 §2): success, clean
+/// refusal, or loud partial state. No variant ever claims atomicity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrictStatus {
+    /// Every target was written and verified.
+    Success,
+    /// Refused with no net change: either the preflight refused before the
+    /// first write, or a failure restored every changed window and each
+    /// restore was verified.
+    CleanRefusal,
+    /// At least one changed window could not be restored and verified; the
+    /// observed frames are in [`StrictBatchResult::result`]'s outcomes. Never
+    /// reported as success.
+    LoudPartial,
+}
+
+/// Result of [`apply_batch_strict`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrictBatchResult {
+    /// Per-window outcomes, in the same shape as [`BatchResult`].
+    pub result: BatchResult,
+    /// True when the preflight refused before the first write: **zero**
+    /// windows were touched.
+    pub refused_before_write: bool,
+}
+
+impl StrictBatchResult {
+    /// The ADR-0006 three-way verdict.
+    pub fn status(&self) -> StrictStatus {
+        if self.result.error.is_none() {
+            StrictStatus::Success
+        } else if self.result.rollback_all_restored {
+            StrictStatus::CleanRefusal
+        } else {
+            StrictStatus::LoudPartial
+        }
+    }
+}
+
+/// Apply `targets` with the strict no-partial contract (ADR-0006):
+///
+/// 1. **Preflight**: every target frame is read before the first write. Any
+///    read failure refuses the operation with zero writes
+///    (`refused_before_write == true`), naming the failing target.
+/// 2. **Verified writes** in plan order, each through the single-window
+///    no-partial `BatchOps::set_frame` contract; the first failure stops the
+///    batch.
+/// 3. **Full rollback**: every window already written — including the failed
+///    one, whose single-window transaction may have left a partial write — is
+///    restored to its preflight frame and the restore is verified.
+///
+/// Strict no-partial is a product promise, not platform atomicity: a restore
+/// that cannot be verified surfaces as [`StrictStatus::LoudPartial`] with the
+/// observed frames, never as success (ADR-0006 §2; Paths F–H residual race).
+pub fn apply_batch_strict<O: BatchOps>(ops: &O, targets: &[BatchTarget]) -> StrictBatchResult {
+    // Phase 1 - preflight: read every frame before the first write.
+    let mut saved: Vec<(WindowKey, Rect)> = Vec::with_capacity(targets.len());
+    for target in targets {
+        match ops.read_frame(target.window) {
+            Ok(before) => saved.push((target.window, before)),
+            Err(error) => {
+                return StrictBatchResult {
+                    refused_before_write: true,
+                    result: BatchResult {
+                        outcomes: Vec::new(),
+                        failed_at: Some(target.window),
+                        error: Some(error),
+                        rollback_all_restored: true,
+                    },
+                };
+            }
+        }
+    }
+
+    // Phase 2 - verified writes in plan order with full rollback.
+    let mut written: Vec<(WindowKey, Rect)> = Vec::with_capacity(targets.len());
+    let mut outcomes: Vec<(WindowKey, WindowOutcome)> = Vec::new();
+    for (target, (_, before)) in targets.iter().zip(&saved) {
+        // Saved before the attempt: set_frame may leave a partial write on
+        // failure, so the failed window is part of the rollback set too.
+        written.push((target.window, *before));
+        match ops.set_frame(target.window, target.rect) {
+            Ok(actual) => record_outcome(
+                &mut outcomes,
+                target.window,
+                WindowOutcome::Applied {
+                    requested: target.rect,
+                    actual,
+                },
+            ),
+            Err(error) => {
+                let result = finish(ops, written, outcomes, target.window, error);
+                return StrictBatchResult {
+                    refused_before_write: false,
+                    result,
+                };
+            }
+        }
+    }
+
+    StrictBatchResult {
+        refused_before_write: false,
+        result: BatchResult {
+            outcomes,
+            failed_at: None,
+            error: None,
+            rollback_all_restored: true,
+        },
     }
 }
 
@@ -420,6 +540,126 @@ mod tests {
         assert_eq!(result.failed_at, Some(WindowKey(1)));
         assert!(result.outcomes.is_empty());
         assert!(result.rollback_all_restored);
+        assert!(ops.writes.borrow().is_empty());
+    }
+
+    // MARK: - Strict no-partial path (ADR-0006)
+
+    #[test]
+    fn strict_preflight_refuses_with_zero_writes_where_best_effort_would_write() {
+        let mut ops = MockBatch::with(&[
+            (1, Rect::new(0.0, 0.0, 100.0, 50.0)),
+            (2, Rect::new(0.0, 0.0, 100.0, 50.0)),
+        ]);
+        ops.fail_read.insert(2);
+        let targets = [
+            target(1, 10.0, 10.0, 200.0, 100.0),
+            target(2, 220.0, 10.0, 200.0, 100.0),
+        ];
+        let result = apply_batch_strict(&ops, &targets);
+        // Preflight refused before the first write: zero windows touched.
+        assert!(result.refused_before_write);
+        assert_eq!(result.result.failed_at, Some(WindowKey(2)));
+        assert!(result.result.outcomes.is_empty());
+        assert!(result.result.rollback_all_restored);
+        assert!(ops.writes.borrow().is_empty());
+        assert_eq!(result.status(), StrictStatus::CleanRefusal);
+
+        // The ADR-0005 path reads interleaved: it writes window 1, then
+        // restores it after window 2's read fails — writes happened, while
+        // the strict preflight performed none. The contracts differ here.
+        let best_effort = apply_batch(&ops, &targets);
+        assert!(!ops.writes.borrow().is_empty());
+        assert_eq!(best_effort.failed_at, Some(WindowKey(2)));
+    }
+
+    #[test]
+    fn strict_all_targets_applied_reports_success() {
+        let ops = MockBatch::with(&[
+            (1, Rect::new(0.0, 0.0, 100.0, 50.0)),
+            (2, Rect::new(0.0, 0.0, 100.0, 50.0)),
+        ]);
+        let result = apply_batch_strict(
+            &ops,
+            &[
+                target(1, 10.0, 10.0, 200.0, 100.0),
+                target(2, 220.0, 10.0, 200.0, 100.0),
+            ],
+        );
+        assert!(!result.refused_before_write);
+        assert!(result.result.error.is_none());
+        assert_eq!(result.result.outcomes.len(), 2);
+        assert_eq!(result.status(), StrictStatus::Success);
+    }
+
+    #[test]
+    fn strict_failure_rolls_back_every_written_window() {
+        let mut ops = MockBatch::with(&[
+            (1, Rect::new(0.0, 0.0, 100.0, 50.0)),
+            (2, Rect::new(0.0, 0.0, 100.0, 50.0)),
+        ]);
+        ops.fail_set.insert(2);
+        let result = apply_batch_strict(
+            &ops,
+            &[
+                target(1, 10.0, 10.0, 200.0, 100.0),
+                target(2, 220.0, 10.0, 200.0, 100.0),
+            ],
+        );
+        assert!(!result.refused_before_write);
+        assert_eq!(result.result.failed_at, Some(WindowKey(2)));
+        assert!(result.result.rollback_all_restored);
+        // Clean refusal: every changed window restored and verified.
+        assert_eq!(result.status(), StrictStatus::CleanRefusal);
+        assert!(result
+            .result
+            .outcomes
+            .iter()
+            .all(|(_, outcome)| matches!(outcome, WindowOutcome::RolledBack { .. })));
+        // Window 1 back at its preflight frame; window 2 never moved.
+        assert_eq!(
+            ops.frames.borrow().get(&1),
+            Some(&Rect::new(0.0, 0.0, 100.0, 50.0))
+        );
+        assert_eq!(
+            ops.frames.borrow().get(&2),
+            Some(&Rect::new(0.0, 0.0, 100.0, 50.0))
+        );
+        // 1 successful set + 2 restores (failed window included).
+        assert_eq!(ops.writes.borrow().len(), 3);
+    }
+
+    #[test]
+    fn strict_unverifiable_restore_is_a_loud_partial_never_success() {
+        let mut ops = MockBatch::with(&[
+            (1, Rect::new(0.0, 0.0, 100.0, 50.0)),
+            (2, Rect::new(0.0, 0.0, 100.0, 50.0)),
+        ]);
+        ops.fail_set.insert(2);
+        ops.fail_restore.insert(1);
+        let result = apply_batch_strict(
+            &ops,
+            &[
+                target(1, 10.0, 10.0, 200.0, 100.0),
+                target(2, 220.0, 10.0, 200.0, 100.0),
+            ],
+        );
+        assert!(!result.refused_before_write);
+        assert!(!result.result.rollback_all_restored);
+        assert_eq!(result.status(), StrictStatus::LoudPartial);
+        // The un-restored window reports its observed (unknown) frame honestly.
+        assert!(matches!(
+            result.result.outcomes[0].1,
+            WindowOutcome::RolledBack { actual: None, .. }
+        ));
+    }
+
+    #[test]
+    fn strict_empty_batch_is_a_success_without_writes() {
+        let ops = MockBatch::default();
+        let result = apply_batch_strict(&ops, &[]);
+        assert!(!result.refused_before_write);
+        assert_eq!(result.status(), StrictStatus::Success);
         assert!(ops.writes.borrow().is_empty());
     }
 

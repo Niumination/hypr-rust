@@ -12,7 +12,7 @@ mod layout;
 pub use domain::{
     plan_from_port, plan_snapshot, plan_snapshot_with_rules, DisplayId, DisplaySnapshot,
     ExcludedWindow, ExclusionReason, LayoutPlan, PlanError, PlatformSnapshot, PlatformSnapshotPort,
-    SnapshotReadError, WindowCapabilities, WindowDialogRule, WindowRole, WindowSnapshot,
+    SnapshotReadError, WindowCapabilities, WindowRole, WindowRuleOverride, WindowSnapshot,
 };
 pub use geometry::Rect;
 pub use layout::{
