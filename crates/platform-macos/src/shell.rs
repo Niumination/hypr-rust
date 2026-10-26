@@ -166,13 +166,17 @@ struct SettingsPanel {
     dialogs: Handle,
     rows_area: Handle,
     save: Handle,
+    /// Top strip text line: mirrors the save/invalid status so the outcome
+    /// is visible in the panel itself, not only on the menu chip
+    /// (owner decision 2026-10-26).
+    status: Handle,
 }
 
 // Field layout inside the panel content view (content coordinates, origin at
 // the bottom-left; the title bar sits above). The rules area holds the
 // per-rule rows (bundle entry + policy popup + remove per row); Save saves
 // what is on screen, rules from the rows.
-const K_SETTINGS_RECTS: [(f64, f64, f64, f64); 16] = [
+const K_SETTINGS_RECTS: [(f64, f64, f64, f64); 17] = [
     (16.0, 292.0, 88.0, 20.0),   // label "Layout"
     (110.0, 288.0, 150.0, 24.0), // popup
     (16.0, 260.0, 88.0, 20.0),   // label "Outer gap"
@@ -189,6 +193,7 @@ const K_SETTINGS_RECTS: [(f64, f64, f64, f64); 16] = [
     (16.0, 170.0, 190.0, 18.0),  // label "Rules (JSON array)"
     (16.0, 66.0, 308.0, 96.0),   // rules row area
     (210.0, 166.0, 100.0, 22.0), // Add rule
+    (16.0, 308.0, 308.0, 16.0),  // status line (Save outcomes; cleared on open)
 ];
 
 /// Handle kinds for [`create_settings_panel`].
@@ -328,6 +333,25 @@ fn save_settings_from_panel() {
             checkbox_on(panel.dialogs),
         )
     };
+    // Field-level number validation before the body is built (owner decision
+    // 2026-10-26): a comma decimal separator or stray characters are refused
+    // with the field named and the expected shape, instead of surfacing later
+    // as a generic JSON error. Range checks stay in `Config` (0.05–0.95 and
+    // ≥ 0); this step only decides whether the text is a number at all.
+    for (name, text) in [
+        ("outer_gap", outer.as_str()),
+        ("inner_gap", inner.as_str()),
+        ("master_ratio", ratio.as_str()),
+    ] {
+        let trimmed = text.trim();
+        if trimmed.is_empty() || !is_json_number(trimmed) {
+            set_settings_status(
+                panel,
+                &format!("invalid number in {name}: {trimmed:?} (use digits and a dot, e.g. 0.35)"),
+            );
+            return;
+        }
+    }
     // The rows are the authority for rules: the panel saves only the
     // canonical regenerated JSON built from them — raw entry text never
     // reaches the body, and the final `Config::from_json` validation (the
@@ -349,15 +373,72 @@ fn save_settings_from_panel() {
         Ok(config) => match config.save() {
             Ok(()) => {
                 STATE.lock().unwrap().config = Some(config);
-                set_status("settings saved");
+                set_settings_status(panel, "settings saved");
             }
-            Err(error) => set_status(&format!("settings save failed: {error}")),
+            Err(error) => {
+                set_settings_status(panel, &format!("settings save failed: {error}"));
+            }
         },
         Err(error) => {
-            set_status(&format!("settings invalid: {error}"));
+            set_settings_status(panel, &format!("settings invalid: {error}"));
         }
     }
-    refresh_menu();
+}
+
+/// Publish a settings outcome where the user is looking: the menu chip and
+/// the panel's own status line (owner decision 2026-10-26 — the panel used
+/// to stay silent and the chip was easy to miss).
+fn set_settings_status(panel: SettingsPanel, status: &str) {
+    // SAFETY: live NSTextField on the main thread (the save path runs only
+    // from the button action, the self-test or the proof).
+    unsafe { set_field_text(panel.status, status) };
+    set_status(status);
+}
+
+/// Strict JSON-number check: `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?\d+)?`.
+///
+/// The panel's body builder (`number_text`) only screens characters, so a
+/// value like `.35`, `0.35e` or `0.35.` still passes that guard and breaks
+/// the generated body (observed on the owner's host as "config is not valid
+/// JSON"). This refuses everything the JSON parser cannot read as a number;
+/// range validation remains with `Config`.
+fn is_json_number(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+    if index < bytes.len() && bytes[index] == b'-' {
+        index += 1;
+    }
+    let integer_start = index;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        index += 1;
+    }
+    if index == integer_start {
+        return false;
+    }
+    if index < bytes.len() && bytes[index] == b'.' {
+        index += 1;
+        let fraction_start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index == fraction_start {
+            return false;
+        }
+    }
+    if index < bytes.len() && (bytes[index] == b'e' || bytes[index] == b'E') {
+        index += 1;
+        if index < bytes.len() && (bytes[index] == b'+' || bytes[index] == b'-') {
+            index += 1;
+        }
+        let exponent_start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index == exponent_start {
+            return false;
+        }
+    }
+    index == bytes.len()
 }
 
 /// Open (and on first use build) the settings panel, populated from the
@@ -585,6 +666,9 @@ unsafe fn populate_settings(panel: SettingsPanel, config: &Config, target: Id) {
         // the effective config; Save re-validates whatever the rows hold (the
         // same entry validation a file load runs).
         rebuild_rules_rows(panel.rows_area, &config.rules, target);
+        // A fresh open starts with a silent status line; outcomes are written
+        // by the save path.
+        set_field_text(panel.status, "");
     }
 }
 
@@ -675,6 +759,10 @@ unsafe fn create_settings_panel(target: Id) -> SettingsPanel {
             "closeSettings:",
         );
 
+        // Status line at the top strip: the save outcome also appears here so
+        // the user does not have to open the menu to see what happened.
+        let status = make_label(content, K_SETTINGS_RECTS[16], "");
+
         SettingsPanel {
             window: Handle(window),
             popup: Handle(popup),
@@ -685,6 +773,7 @@ unsafe fn create_settings_panel(target: Id) -> SettingsPanel {
             dialogs,
             rows_area,
             save,
+            status,
         }
     }
 }
@@ -1085,7 +1174,7 @@ unsafe fn make_button(
 /// Allocate/initialize a static label.
 ///
 /// SAFETY: main thread; `content` must be a live view.
-unsafe fn make_label(content: Id, place: (f64, f64, f64, f64), title: &str) {
+unsafe fn make_label(content: Id, place: (f64, f64, f64, f64), title: &str) -> Handle {
     // SAFETY: documented initialisers; disabling edit/border/background turns
     // a plain text field into a label.
     unsafe {
@@ -1098,6 +1187,7 @@ unsafe fn make_label(content: Id, place: (f64, f64, f64, f64), title: &str) {
         msg_bool(label, sel("setDrawsBackground:"), false);
         msg_void_id(label, sel("setStringValue:"), nsstring(title));
         msg_void_id(content, sel("addSubview:"), label);
+        Handle(label)
     }
 }
 
@@ -2034,6 +2124,24 @@ pub fn panel_click_proof() -> i32 {
         // stable prefix, not a per-rule detail wording.
         let ok1 = rows1 == 1 && status1.starts_with("settings invalid:") && absent1;
 
+        // Round 1b: the comma decimal separator the owner typed on this host
+        // ("0,35") must be refused with the field named, the panel's status
+        // line must mirror the chip, and the file must stay absent. The ratio
+        // text is restored afterwards so Round 2 saves a valid body.
+        set_field_text(panel.ratio, "0,35");
+        msg_void_id(panel.save.0, sel("performClick:"), std::ptr::null_mut());
+        let status1b = STATE.lock().unwrap().status.clone();
+        let label1b = field_text(panel.status);
+        let absent1b = !path.exists();
+        append_log(&format!(
+            "panel click proof: comma round status={status1b:?} label={label1b:?} file_absent={absent1b}"
+        ));
+        set_field_text(panel.ratio, "0.55");
+        // Match the field-named prefix, not the exact suggestion wording.
+        let ok1b = status1b.starts_with("invalid number in master_ratio:")
+            && label1b == status1b
+            && absent1b;
+
         // Round 2: fill the row at the row surface (bundle id + the exclude
         // policy) + a Save click must save the canonical body (one bundle
         // rule) with owner-only 0600.
@@ -2044,8 +2152,9 @@ pub fn panel_click_proof() -> i32 {
         }
         msg_void_id(panel.save.0, sel("performClick:"), std::ptr::null_mut());
         let status2 = STATE.lock().unwrap().status.clone();
+        let label2 = field_text(panel.status);
         append_log(&format!(
-            "panel click proof: valid round rows={} status={status2:?}",
+            "panel click proof: valid round rows={} status={status2:?} label={label2:?}",
             RULE_ROWS.lock().unwrap().len()
         ));
         let (ok2, detail) = match Config::load() {
@@ -2058,9 +2167,12 @@ pub fn panel_click_proof() -> i32 {
                     && config.rules[0].bundle.as_deref() == Some("com.example.proof")
                     && config.rules[0].dialogs == DialogPolicy::Exclude;
                 let mode_ok = crate::config::is_owner_only_mode(mode);
+                let label_ok = label2 == status2;
                 (
-                    status2 == "settings saved" && rules_ok && mode_ok,
-                    format!("rules_ok={rules_ok} mode={mode:o} mode_ok={mode_ok}"),
+                    status2 == "settings saved" && label_ok && rules_ok && mode_ok,
+                    format!(
+                        "rules_ok={rules_ok} mode={mode:o} mode_ok={mode_ok} label_ok={label_ok}"
+                    ),
                 )
             }
             Err(error) => (false, format!("load failed: {error}")),
@@ -2080,7 +2192,7 @@ pub fn panel_click_proof() -> i32 {
                 false
             }
         };
-        let exit_code = if ok1 && ok2 && cleaned {
+        let exit_code = if ok1 && ok1b && ok2 && cleaned {
             K_SELF_TEST_EXIT_OK
         } else {
             K_SELF_TEST_EXIT_RESTORE_FAILED
@@ -2154,5 +2266,39 @@ mod pre_run_classification_tests {
         assert!(matches!(result, PreRun::Unsafe(_)));
         assert_eq!(std::fs::read_link(&path).unwrap(), target);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod settings_number_validation_tests {
+    use super::is_json_number;
+
+    #[test]
+    fn accepts_every_number_the_json_parser_reads() {
+        for text in ["0", "0.35", "40", "12", "-0.5", "1e5", "1.5E-2", "007"] {
+            assert!(is_json_number(text), "{text:?} should be accepted");
+        }
+    }
+
+    #[test]
+    fn refuses_everything_the_json_parser_cannot_read() {
+        // ".35", "0.35e" and "0.35." are the character-clean values that
+        // previously broke the generated body ("config is not valid JSON");
+        // "0,35" is the comma decimal separator typed on the owner's host.
+        for text in [
+            "",
+            " ",
+            ".35",
+            "0.35e",
+            "0.35.",
+            "0,35",
+            "+1",
+            "0..5",
+            "abc",
+            "0.35 0.35",
+            "1e",
+        ] {
+            assert!(!is_json_number(text), "{text:?} should be refused");
+        }
     }
 }
