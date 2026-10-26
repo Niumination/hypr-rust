@@ -14,7 +14,7 @@ use std::ffi::CString;
 use std::os::raw::c_char;
 use std::sync::Mutex;
 
-use layout_core::{DisplayId, PlatformSnapshot, Rect, WindowRole};
+use layout_core::{DisplayId, PlatformSnapshot, Rect};
 
 use crate::adapter::MacAxAdapter;
 use crate::batch;
@@ -1392,28 +1392,38 @@ fn work_area() -> Rect {
 }
 
 /// Per-window rule overrides for one reflow: the app's first matching rule
-/// decides the dialog policy for that app's Dialog windows only; mandatory
-/// roles never appear here (planner gates keep them excluded).
+/// decides the policy for that app (ADR-0006).
+///
+/// - `DialogPolicy::Exclude` → an `exclude` override for **every** window of
+///   that app — app protection: its normal windows are protected too, not
+///   only its dialogs.
+/// - `DialogPolicy::Include` → an `include` override (widening the dialog
+///   policy); the planner consults it only for `Dialog` windows.
+/// - `DialogPolicy::Default` → no overrides; the global `include_dialogs`
+///   policy in the planner applies unchanged.
+///
+/// Mandatory roles never appear as effective overrides (planner gates keep
+/// them excluded regardless; rules cannot unlock mandatory).
 ///
 /// SAFETY: main thread; AppKit query only (bundle id, never titles).
-fn dialog_policy_rules(
+fn window_rule_overrides(
     snapshot: &PlatformSnapshot,
     pid: u32,
     rules: &[WindowRule],
-    include_dialogs: bool,
-) -> Vec<layout_core::WindowDialogRule> {
+) -> Vec<layout_core::WindowRuleOverride> {
     let bundle = unsafe { app_bundle_id(pid) };
-    let include = match dialog_policy_for(rules, pid, bundle.as_deref()) {
-        DialogPolicy::Exclude => false,
-        DialogPolicy::Include => true,
-        DialogPolicy::Default => include_dialogs,
+    let (exclude, include) = match dialog_policy_for(rules, pid, bundle.as_deref()) {
+        DialogPolicy::Exclude => (true, None),
+        DialogPolicy::Include => (false, Some(true)),
+        // No override: the planner follows the global policy per window.
+        DialogPolicy::Default => return Vec::new(),
     };
     snapshot
         .windows
         .iter()
-        .filter(|window| window.role == WindowRole::Dialog)
-        .map(|window| layout_core::WindowDialogRule {
+        .map(|window| layout_core::WindowRuleOverride {
             window: window.id,
+            exclude,
             include,
         })
         .collect()
@@ -1462,14 +1472,14 @@ fn perform_reflow() {
         }
     };
     let observation = set.observe(work_area());
-    let dialog_rules = dialog_policy_rules(&observation.snapshot, pid, &rules, include_dialogs);
+    let window_rules = window_rule_overrides(&observation.snapshot, pid, &rules);
     let plan = match layout_core::plan_snapshot_with_rules(
         &observation.snapshot,
         DisplayId(0),
         kind,
         layout,
         include_dialogs,
-        &dialog_rules,
+        &window_rules,
     ) {
         Ok(plan) => plan,
         Err(error) => {

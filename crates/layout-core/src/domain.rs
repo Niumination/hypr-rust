@@ -104,6 +104,10 @@ pub enum ExclusionReason {
     SystemWindow,
     DesktopWindow,
     DialogPolicy,
+    /// A matching user rule excluded this window (app protection, ADR-0006).
+    /// Applied only after the mandatory gates above — a rule can never
+    /// re-include an own/system/desktop window.
+    RuleExcluded,
     MoveUnsupported,
     ResizeUnsupported,
     InvalidFrame,
@@ -115,15 +119,23 @@ pub struct ExcludedWindow {
     pub reason: ExclusionReason,
 }
 
-/// Per-window dialog-policy override from user rules.
+/// Per-window override derived from a user rule (ADR-0006).
 ///
-/// A rule may only widen or narrow the **dialog policy** for that one window:
-/// it can never make a mandatory exclusion (`OwnApplication`, `System`,
-/// `Desktop`) or an unsupported/invalid window tileable.
+/// - `exclude` excludes this window from tiling regardless of its role — the
+///   app-protection path: a matching `exclude` rule protects an app's normal
+///   windows as well as its dialogs.
+/// - `include` overrides the dialog include policy for a `Dialog` window;
+///   `None` follows the global `include_dialogs` policy. It is ignored for a
+///   window with `exclude`.
+///
+/// Overrides are evaluated **after** the mandatory gates: a rule can never
+/// make an `OwnApplication`, `System`, or `Desktop` window tileable, nor an
+/// unsupported or invalid window valid. "Rules cannot unlock mandatory" holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WindowDialogRule {
+pub struct WindowRuleOverride {
     pub window: WindowId,
-    pub include: bool,
+    pub exclude: bool,
+    pub include: Option<bool>,
 }
 
 /// A pure desired-geometry result. It contains no requests to move, resize,
@@ -198,16 +210,19 @@ pub fn plan_snapshot(
     plan_snapshot_inner(snapshot, display_id, kind, config, include_dialogs, None)
 }
 
-/// [`plan_snapshot`] with per-window dialog-policy overrides from user rules
-/// (see [`WindowDialogRule`]). Windows without a matching rule follow the
-/// global `include_dialogs` policy.
+/// [`plan_snapshot`] with per-window overrides derived from user rules (see
+/// [`WindowRuleOverride`]): a matching `exclude` rule removes that window from
+/// tiling (app protection), and a dialog-policy override narrows or widens the
+/// include decision for a `Dialog` window. Windows without a matching override
+/// follow the global `include_dialogs` policy. Mandatory exclusions are
+/// evaluated before any override and cannot be widened.
 pub fn plan_snapshot_with_rules(
     snapshot: &PlatformSnapshot,
     display_id: DisplayId,
     kind: LayoutKind,
     config: LayoutConfig,
     include_dialogs: bool,
-    dialog_rules: &[WindowDialogRule],
+    window_rules: &[WindowRuleOverride],
 ) -> Result<LayoutPlan, PlanError> {
     plan_snapshot_inner(
         snapshot,
@@ -215,7 +230,7 @@ pub fn plan_snapshot_with_rules(
         kind,
         config,
         include_dialogs,
-        Some(dialog_rules),
+        Some(window_rules),
     )
 }
 
@@ -225,7 +240,7 @@ fn plan_snapshot_inner(
     kind: LayoutKind,
     config: LayoutConfig,
     include_dialogs: bool,
-    dialog_rules: Option<&[WindowDialogRule]>,
+    window_rules: Option<&[WindowRuleOverride]>,
 ) -> Result<LayoutPlan, PlanError> {
     let display = snapshot
         .displays
@@ -247,7 +262,7 @@ fn plan_snapshot_inner(
     let mut eligible = Vec::new();
     let mut excluded = Vec::new();
     for window in snapshot.windows.iter().filter(|w| w.display == display_id) {
-        let reason = exclusion_reason(window, include_dialogs, dialog_rules);
+        let reason = exclusion_reason(window, include_dialogs, window_rules);
         if let Some(reason) = reason {
             excluded.push(ExcludedWindow {
                 window: window.id,
@@ -316,24 +331,34 @@ fn valid_constraints(constraints: WindowConstraints) -> bool {
 fn exclusion_reason(
     window: &WindowSnapshot,
     include_dialogs: bool,
-    dialog_rules: Option<&[WindowDialogRule]>,
+    window_rules: Option<&[WindowRuleOverride]>,
 ) -> Option<ExclusionReason> {
+    // Mandatory gates first: no rule override is consulted for these, so a
+    // rule can never unlock own/system/desktop windows ("rules cannot unlock
+    // mandatory" holds by evaluation order).
     match window.role {
         WindowRole::OwnApplication => return Some(ExclusionReason::OwnApplication),
         WindowRole::System => return Some(ExclusionReason::SystemWindow),
         WindowRole::Desktop => return Some(ExclusionReason::DesktopWindow),
-        WindowRole::Dialog => {
-            let include = dialog_rules
-                .unwrap_or(&[])
-                .iter()
-                .find(|rule| rule.window == window.id)
-                .map(|rule| rule.include)
-                .unwrap_or(include_dialogs);
-            if !include {
-                return Some(ExclusionReason::DialogPolicy);
-            }
+        WindowRole::Dialog | WindowRole::Application => {}
+    }
+    let rule = window_rules
+        .unwrap_or(&[])
+        .iter()
+        .find(|rule| rule.window == window.id);
+    // App protection (ADR-0006): a matching `exclude` rule removes this
+    // window from tiling whatever its role — normal windows as well as
+    // dialogs, after the mandatory gates above.
+    if rule.is_some_and(|rule| rule.exclude) {
+        return Some(ExclusionReason::RuleExcluded);
+    }
+    if window.role == WindowRole::Dialog {
+        let include = rule
+            .and_then(|rule| rule.include)
+            .unwrap_or(include_dialogs);
+        if !include {
+            return Some(ExclusionReason::DialogPolicy);
         }
-        WindowRole::Application => {}
     }
     if !window.capabilities.can_move {
         return Some(ExclusionReason::MoveUnsupported);
@@ -433,9 +458,10 @@ mod tests {
             LayoutKind::MasterStack,
             default_layout(),
             false,
-            &[WindowDialogRule {
+            &[WindowRuleOverride {
                 window: WindowId(4),
-                include: true,
+                exclude: false,
+                include: Some(true),
             }],
         )
         .unwrap();
@@ -454,9 +480,10 @@ mod tests {
             LayoutKind::MasterStack,
             default_layout(),
             true,
-            &[WindowDialogRule {
+            &[WindowRuleOverride {
                 window: WindowId(4),
-                include: false,
+                exclude: false,
+                include: Some(false),
             }],
         )
         .unwrap();
@@ -470,28 +497,106 @@ mod tests {
     }
 
     #[test]
-    fn dialog_rules_cannot_unlock_mandatory_exclusions() {
-        // An OwnApplication/System window stays excluded no matter what the
-        // rule says; rules only touch the Dialog policy arm.
-        for (id, role) in [(1, WindowRole::OwnApplication), (2, WindowRole::System)] {
+    fn rules_cannot_unlock_mandatory_exclusions() {
+        // A mandatory window (own/system/desktop) stays excluded whatever the
+        // override says: both the `include` widening and the `exclude` flag
+        // are evaluated after the mandatory gates.
+        let roles = [
+            (1, WindowRole::OwnApplication),
+            (2, WindowRole::System),
+            (3, WindowRole::Desktop),
+        ];
+        let overrides = [
+            WindowRuleOverride {
+                window: WindowId(0),
+                exclude: false,
+                include: Some(true),
+            },
+            WindowRuleOverride {
+                window: WindowId(0),
+                exclude: true,
+                include: None,
+            },
+        ];
+        for (id, role) in roles {
             let mut window = window(id, role);
             window.frame = Rect::new(0.0, 0.0, 100.0, 100.0);
             let state = snapshot(vec![window], None);
-            let plan = plan_snapshot_with_rules(
-                &state,
-                DISPLAY,
-                LayoutKind::MasterStack,
-                default_layout(),
-                false,
-                &[WindowDialogRule {
-                    window: WindowId(id),
-                    include: true,
-                }],
-            )
-            .unwrap();
-            assert!(plan.placements.is_empty());
-            assert!(plan.excluded.iter().any(|item| item.window == WindowId(id)));
+            for override_rule in overrides {
+                let mut override_rule = override_rule;
+                override_rule.window = WindowId(id);
+                let plan = plan_snapshot_with_rules(
+                    &state,
+                    DISPLAY,
+                    LayoutKind::MasterStack,
+                    default_layout(),
+                    false,
+                    &[override_rule],
+                )
+                .unwrap();
+                assert!(plan.placements.is_empty());
+                assert!(plan.excluded.iter().any(|item| item.window == WindowId(id)));
+            }
         }
+    }
+
+    #[test]
+    fn exclude_rule_excludes_a_normal_app_window() {
+        // App protection (ADR-0006): `exclude` removes a normal window from
+        // tiling, not only dialogs.
+        let mut app = window(6, WindowRole::Application);
+        app.frame = Rect::new(10.0, 10.0, 100.0, 100.0);
+        let mut other = window(7, WindowRole::Application);
+        other.frame = Rect::new(120.0, 10.0, 100.0, 100.0);
+        let state = snapshot(vec![app, other], Some(WindowId(6)));
+        let plan = plan_snapshot_with_rules(
+            &state,
+            DISPLAY,
+            LayoutKind::MasterStack,
+            default_layout(),
+            false,
+            &[WindowRuleOverride {
+                window: WindowId(7),
+                exclude: true,
+                include: None,
+            }],
+        )
+        .unwrap();
+        assert_eq!(plan.placements.len(), 1);
+        assert_eq!(plan.placements[0].window, WindowId(6));
+        assert!(
+            plan.excluded
+                .iter()
+                .any(|item| item.window == WindowId(7)
+                    && item.reason == ExclusionReason::RuleExcluded)
+        );
+    }
+
+    #[test]
+    fn exclude_rule_wins_over_dialog_include_for_a_dialog() {
+        let mut dialog = window(4, WindowRole::Dialog);
+        dialog.frame = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let state = snapshot(vec![dialog], Some(WindowId(4)));
+        let plan = plan_snapshot_with_rules(
+            &state,
+            DISPLAY,
+            LayoutKind::MasterStack,
+            default_layout(),
+            true,
+            &[WindowRuleOverride {
+                window: WindowId(4),
+                exclude: true,
+                include: Some(true),
+            }],
+        )
+        .unwrap();
+        assert!(plan.placements.is_empty());
+        assert!(
+            plan.excluded
+                .iter()
+                .any(|item| item.window == WindowId(4)
+                    && item.reason == ExclusionReason::RuleExcluded)
+        );
     }
 
     #[test]
