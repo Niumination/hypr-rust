@@ -528,6 +528,9 @@ fn parse_map(bytes: &[u8], pos: &mut usize) -> Result<Vec<(String, Value)>, Conf
     expect(bytes, pos, b'{')?;
     skip_ws(bytes, pos);
     if peek(bytes, *pos) == Some(b'}') {
+        // Same empty-shortcut rule as parse_list: consume the closing brace
+        // so an enclosing parser does not read a leftover `}`.
+        *pos += 1;
         return Ok(items);
     }
     loop {
@@ -552,6 +555,12 @@ fn parse_list(bytes: &[u8], pos: &mut usize) -> Result<Vec<Value>, ConfigError> 
     expect(bytes, pos, b'[')?;
     skip_ws(bytes, pos);
     if peek(bytes, *pos) == Some(b']') {
+        // Consume the closing bracket: the empty-list shortcut must advance
+        // past `]` exactly like the loop path below, or the enclosing object
+        // parser reads the leftover `]` where it expects `,` or `}` and
+        // rejects a valid body (`"rules": []` — the panel's zero-rule
+        // scenario — hit this on the owner's host, 2026-10-26).
+        *pos += 1;
         return Ok(Vec::new());
     }
     let mut items = Vec::new();
@@ -650,6 +659,40 @@ fn expect_word(bytes: &[u8], pos: &mut usize, word: &[u8]) -> Result<(), ConfigE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exact multi-line body the settings panel generates for the
+    /// owner's first-run scenario (0 rows, 0.35/40) — observed failing with
+    /// `config is not valid JSON` on the host (2026-10-26). The body is
+    /// valid JSON, so `from_json` must accept it; this is the regression
+    /// test for that finding.
+    #[test]
+    fn panel_body_with_zero_rules_parses() {
+        let body = concat!(
+            "{\n",
+            "  \"version\": 1,\n",
+            "  \"layout\": \"master-stack\",\n",
+            "  \"outer_gap\": 40,\n",
+            "  \"inner_gap\": 8,\n",
+            "  \"master_ratio\": 0.35,\n",
+            "  \"auto_tiling\": false,\n",
+            "  \"include_dialogs\": false,\n",
+            "  \"rules\": []\n",
+            "}\n"
+        );
+        let config = Config::from_json(body)
+            .unwrap_or_else(|error| panic!("zero-rule panel body rejected: {error}"));
+        assert_eq!(config.layout.outer_gap, 40.0);
+        assert_eq!(config.layout.master_ratio, 0.35);
+        assert!(config.rules.is_empty());
+        // The empty-object shortcut (parse_map) must consume its closing
+        // brace the same way: an empty rule entry must reach the
+        // matcher-required check (Invalid), never a stray-brace Parse.
+        let empty_rule = body.replace("\"rules\": []", "\"rules\": [{}]");
+        assert!(matches!(
+            Config::from_json(&empty_rule),
+            Err(ConfigError::Invalid("rules"))
+        ));
+    }
 
     #[test]
     fn default_config_is_valid_and_disables_auto_tiling() {
