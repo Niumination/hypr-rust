@@ -462,13 +462,24 @@ fn policy_name(policy: DialogPolicy) -> &'static str {
     }
 }
 
-/// Minimal JSON string escaping for the writer.
+/// JSON string escaping for the writer: quotes, backslash, and — since the
+/// owner's 2026-10-26 hardening decision — every control character, so the
+/// writer always emits spec-legal JSON regardless of what a matcher contains.
+/// The reader unescapes the same set (`parse_string`).
 fn json_escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
         match ch {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            control if control < '\u{20}' => {
+                out.push_str(&format!("\\u{:04x}", control as u32));
+            }
             _ => out.push(ch),
         }
     }
@@ -596,16 +607,53 @@ fn parse_value(bytes: &[u8], pos: &mut usize) -> Result<Value, ConfigError> {
 
 fn parse_string(bytes: &[u8], pos: &mut usize) -> Result<String, ConfigError> {
     expect(bytes, pos, b'"')?;
-    let start = *pos;
-    while *pos < bytes.len() && bytes[*pos] != b'"' {
-        *pos += 1;
+    let mut out = String::new();
+    let mut chunk_start = *pos;
+    loop {
+        match peek(bytes, *pos) {
+            None => return Err(ConfigError::Parse),
+            Some(b'"') => {
+                out.push_str(
+                    std::str::from_utf8(&bytes[chunk_start..*pos])
+                        .map_err(|_| ConfigError::Parse)?,
+                );
+                *pos += 1;
+                return Ok(out);
+            }
+            Some(b'\\') => {
+                out.push_str(
+                    std::str::from_utf8(&bytes[chunk_start..*pos])
+                        .map_err(|_| ConfigError::Parse)?,
+                );
+                *pos += 1;
+                let escaped = next(bytes, pos)?;
+                match escaped {
+                    b'"' => out.push('"'),
+                    b'\\' => out.push('\\'),
+                    b'/' => out.push('/'),
+                    b'b' => out.push('\u{08}'),
+                    b'f' => out.push('\u{0c}'),
+                    b'n' => out.push('\n'),
+                    b'r' => out.push('\r'),
+                    b't' => out.push('\t'),
+                    b'u' => {
+                        if *pos + 4 > bytes.len() {
+                            return Err(ConfigError::Parse);
+                        }
+                        let hex = std::str::from_utf8(&bytes[*pos..*pos + 4])
+                            .map_err(|_| ConfigError::Parse)?;
+                        let code = u32::from_str_radix(hex, 16).map_err(|_| ConfigError::Parse)?;
+                        // Lone surrogates are not scalar values.
+                        out.push(char::from_u32(code).ok_or(ConfigError::Parse)?);
+                        *pos += 4;
+                    }
+                    _ => return Err(ConfigError::Parse),
+                }
+                chunk_start = *pos;
+            }
+            Some(_) => *pos += 1,
+        }
     }
-    if *pos >= bytes.len() {
-        return Err(ConfigError::Parse);
-    }
-    let text = std::str::from_utf8(&bytes[start..*pos]).map_err(|_| ConfigError::Parse)?;
-    *pos += 1;
-    Ok(text.to_string())
 }
 
 fn parse_number(bytes: &[u8], pos: &mut usize) -> Result<f64, ConfigError> {
@@ -767,6 +815,56 @@ mod tests {
             parse_config(body).unwrap_err(),
             ConfigError::Invalid("rules")
         );
+    }
+
+    #[test]
+    fn writer_and_reader_round_trip_control_characters() {
+        // json_escape (writer) and parse_string (reader) must agree on the
+        // full escape set: a matcher containing control characters survives
+        // save → load byte-for-byte, and the emitted text is spec-legal
+        // JSON (owner decision 2026-10-26: escape fully, not just " and \).
+        let rule = WindowRule {
+            bundle: Some("com.example.a\tb\nc\u{1}d".to_string()),
+            pid: None,
+            dialogs: DialogPolicy::Exclude,
+        };
+        let text = rules_json(std::slice::from_ref(&rule));
+        // The wire text carries escapes, never raw control bytes.
+        assert!(text.contains("\\t") && text.contains("\\n") && text.contains("\\u0001"));
+        assert!(!text.contains('\t') && !text.contains('\n'));
+        assert_eq!(parse_rules_text(&text).unwrap(), vec![rule]);
+        // Same agreement through the full config body. (Backslash/quote in a
+        // matcher are refused by parse_rules, so only control characters can
+        // round-trip through from_json.)
+        let config = Config {
+            rules: vec![WindowRule {
+                bundle: Some("com.e\u{2}f".to_string()),
+                pid: Some(7),
+                dialogs: DialogPolicy::Default,
+            }],
+            ..Config::default()
+        };
+        let loaded = Config::from_json(&config.to_json()).unwrap();
+        assert_eq!(loaded.rules, config.rules);
+    }
+
+    #[test]
+    fn escaped_quote_does_not_truncate_the_string() {
+        // The old reader stopped at the first raw `"` even when escaped, so
+        // `\"` broke string boundaries (Parse). The reader must consume the
+        // escape and hand the decoded text to validation: a bundle with a
+        // quote decodes and is then refused by the no-quote matcher rule
+        // (Invalid, not Parse).
+        let text = r#"[{"bundle": "com.example.a\"b", "dialogs": "exclude"}]"#;
+        assert_eq!(
+            parse_rules_text(text).unwrap_err(),
+            ConfigError::Invalid("rules")
+        );
+        // Malformed escapes are still hard errors.
+        let bad = r#"[{"bundle": "a\qb", "dialogs": "exclude"}]"#;
+        assert_eq!(parse_rules_text(bad).unwrap_err(), ConfigError::Parse);
+        let short = r#"[{"bundle": "\u00", "dialogs": "exclude"}]"#;
+        assert_eq!(parse_rules_text(short).unwrap_err(), ConfigError::Parse);
     }
 
     #[test]
