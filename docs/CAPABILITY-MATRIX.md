@@ -18,7 +18,7 @@ PRD requirement ("publish a capability matrix per platform/OS build; do not clai
 | Config safety (owner-only 0600, symlink rejection, fail-closed classification) | PASS 4-case + 2-case hosts | ARENA Jalur K addendum 2026-10-25 |
 | **Spaces / native workspaces (macOS)** | **DISABLED** — requirements not proven on this build; no private WindowServer use | [ADR-0003](./adr/0003-native-workspaces.md) |
 | Global hotkeys | NOT IMPLEMENTED | docs/README outstanding list |
-| **Packaging** | **LOCAL DEV BUNDLE ONLY** — `scripts/package-macos.sh` → unsigned/ad-hoc `.app`, CI artifact on `macos-26`; DMG + signing/notarization NOT delivered (PRD β-release gate pending proven plan); distribution claims pending legal review (non-Apple host, USER-DEVICE-PROFILE §5); **AX trust under bundled identity NOT runtime-tested** | [USING-AX-SHELL](./USING-AX-SHELL.md) |
+| **Packaging** | **LOCAL DEV BUNDLE ONLY** — `scripts/package-macos.sh` → unsigned/ad-hoc `.app`, CI artifact on `macos-26`; DMG + signing/notarization NOT delivered (PRD β-release gate pending proven plan); distribution claims pending legal review (non-Apple host, USER-DEVICE-PROFILE §5); **AX trust under the bundled identity runtime-tested** (Path N): LaunchServices identity denied until an explicit TCC grant, then granted with fixture reflow applied — direct-exec inherits the CLI-era chain grant | [USING-AX-SHELL](./USING-AX-SHELL.md); ARENA Path N |
 
 ## Windows 11 x64
 
