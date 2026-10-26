@@ -1,7 +1,7 @@
 # Hypr-Rust — Engineering Documentation
 
-**Status:** Interview baseline / pre-implementation; native macOS M1/M2 single-window proof (host-bound); native batch multi-window implemented with best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md))  
-**Document date:** 2026-10-17 (updated 2026-10-22)  
+**Status:** Interview baseline; native macOS M1/M2 single-window proof + native batch multi-window with best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)) + menu-bar shell and settings panel with a row-based rules editor (host-bound) + a local unsigned `.app` bundle script  
+**Document date:** 2026-10-17 (updated 2026-10-26)  
 **Working name:** Hypr-Rust (placeholder; do not imply affiliation with Hyprland)
 
 ## Executive summary
@@ -35,6 +35,8 @@ The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md)
 14. [Agent workflow inspired by Karpathy's engineering heuristics](./AGENT-WORKFLOW.md)
 15. [ADR-0004: batch multi-window deferred under strict no-partial requirement](./adr/0004-batch-multiwindow-deferred-no-partial.md) (superseded)
 16. [ADR-0005: batch multi-window accepted with best-effort rollback](./adr/0005-batch-multiwindow-best-effort-rollback.md)
+17. [Capability matrix (per platform / OS build)](./CAPABILITY-MATRIX.md)
+18. [Using ax-shell — operations, configuration and local packaging](./USING-AX-SHELL.md)
 
 ## Non-goals and important caveats
 
@@ -55,7 +57,7 @@ The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md)
 - M2 keyboard-first `ax-keyboard` — explicit select/move/resize/raise on the registered fixture (Jalur A PASS, host-bound: ThinkPad X13 Yoga Gen 1, macOS Tahoe 26.7.1).
 - Native batch — `ax-probe batch` applies a multi-window plan with best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)); native-run on the owner's host (two-window success and two-window rollback, both verified). Permission-denied runtime-tested 2026-10-23 via an AX-untrusted launchd user-domain context (exit 3, §6 caveat: one context only).
 - Per-window identity — `ax-probe windows <pid>` enumerates one process's `AXWindows` and `ax-probe apply ... --display ...` runs the snapshot → planner → native-key mapping → batch slice. Host-run 2026-10-23 on the owner's machine: two self-owned windows in one process enumerated with distinct runtime keys, master-stack plan applied and verified, `UnknownTarget` fails closed, rollback verified (see `docs/PLATFORM-SPIKES.md`).
-- Menu-bar shell — `ax-shell` (Rust `NSStatusItem`) shows a status line, explicit reflow commands, pause, an Accessibility status line, diagnostics and quit. Host-run 2026-10-24: the menu was created and read back, one reflow moved the two fixture windows and was verified. Auto-tiling stays off; no settings UI, hotkeys or signed bundle yet.
+- Menu-bar shell — `ax-shell` (Rust `NSStatusItem`) shows a status line, explicit reflow commands, pause, an Accessibility status line, diagnostics and quit; the settings panel carries a **row-based rules editor** (one row per rule; host 2026-10-26 — ARENA-VERIFICATION Path M), and Save is proven through the button's real click dispatch (Path L). Auto-tiling stays off until an explicit reflow command; hotkeys and signed beta-release packaging remain outstanding (a local unsigned `.app` bundle is script-assembled — 2026-10-26).
 
 **Read-only research — not control evidence:**
 
@@ -63,7 +65,7 @@ The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md)
 
 **Does not exist — no production desktop app:**
 
-- Automatic multi-window tiling beyond the CLI proof, Windows adapter, tray/menu-bar UI, settings UI, global hotkeys and packaging are all outstanding. Apple Mac and macOS Ventura 13+ are **not** validated by this evidence; no cross-platform parity is claimed.
+- Automatic multi-window tiling beyond the fixture-bound shell proof, the Windows adapter, global hotkeys, native workspace integration (ADR-0003 gate) and beta/release packaging (a proven signing/notarization path) are outstanding; a local unsigned development bundle is script-assembled (`scripts/package-macos.sh`). Apple Mac and macOS Ventura 13+ are **not** validated by this evidence; no cross-platform parity is claimed.
 
 The macOS spike reports ordinary AX control on a self-owned test window and disables Spaces. The host label conflict (system `MacBookPro16,2` vs owner ThinkPad X13 Yoga) is reconciled in the M1 report §1. PR #1 (Swift spike) and PR #2 (min-size constraints) are merged; the Phase 1 domain/planner/batch work landed via PR #5. See [user device profile](./USER-DEVICE-PROFILE.md), [macOS next stage](./MACOS-TAHOE-NEXT-STAGE.md), and [handoff plan](./AGENT-HANDOFF.md).
 

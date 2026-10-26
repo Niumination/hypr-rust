@@ -59,3 +59,37 @@ jobs:
 
       - name: tests (platform-macos)
         run: cargo test --manifest-path crates/platform-macos/Cargo.toml
+
+  # Local-development packaging (and its validation): assemble the unsigned
+  # .app bundle on the same pinned runner and attach it as an artifact. The
+  # script itself runs plutil -lint on the Info.plist, so a malformed bundle
+  # fails the job. This is intentionally not a beta/release package: the PRD
+  # still gates that on a proven signing/notarization plan, and the owner's
+  # host is non-Apple hardware (distribution claims are a separate open
+  # question — docs/USER-DEVICE-PROFILE.md).
+  package:
+    runs-on: macos-26
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "26.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # Same deliberate pin as lint-and-test above.
+          toolchain: "1.98.1"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            crates/platform-macos
+
+      - name: package (local .app bundle)
+        run: scripts/package-macos.sh
+
+      - name: upload bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ax-shell-macos-app
+          path: crates/platform-macos/target/dist
