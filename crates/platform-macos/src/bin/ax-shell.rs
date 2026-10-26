@@ -8,6 +8,9 @@
 //! Extra modes (no run loop):
 //! - `--self-test` exercises the shell and returns an exit code: 0 pass,
 //!   1 restore failure, 2 skipped run (pre-run config invalid/unsafe).
+//! - `--panel-click-proof` dispatches Save through the real button action
+//!   (performClick:) on the settings panel: 0 pass, 1 proof failure,
+//!   2 skipped (a pre-existing config file is refused untouched).
 //! - `--reset-defaults` writes the default config to `~/.hypr-rust/config.json`.
 
 fn main() {
@@ -24,6 +27,11 @@ fn main() {
         // The self-test is evidence, not a demo: a failed restore or a
         // skipped run must return a failing exit code.
         let code = hypr_rust_platform_macos::shell::self_test();
+        std::process::exit(code);
+    } else if args.iter().any(|arg| arg == "--panel-click-proof") {
+        // Same evidence-not-demo contract: fail closed on proof failure and
+        // on the protective skip path (pre-existing config refused).
+        let code = hypr_rust_platform_macos::shell::panel_click_proof();
         std::process::exit(code);
     } else {
         hypr_rust_platform_macos::shell::run();

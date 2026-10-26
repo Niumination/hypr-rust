@@ -165,6 +165,7 @@ struct SettingsPanel {
     auto_tiling: Handle,
     dialogs: Handle,
     rules: Handle,
+    save: Handle,
 }
 
 // Field layout inside the panel content view (content coordinates, origin at
@@ -620,7 +621,7 @@ unsafe fn create_settings_panel(target: Id) -> SettingsPanel {
         let rules = make_rules_text(content, K_SETTINGS_RECTS[14]);
 
         // Save / Close: the window retains them; the actions live on `target`.
-        let _save = make_button(
+        let save = make_button(
             content,
             K_SETTINGS_RECTS[10],
             "Save",
@@ -644,6 +645,7 @@ unsafe fn create_settings_panel(target: Id) -> SettingsPanel {
             auto_tiling,
             dialogs,
             rules,
+            save,
         }
     }
 }
@@ -1570,6 +1572,147 @@ pub fn self_test() -> i32 {
         // disk - the summary reads the adopted in-memory state.
         action_diagnostics(std::ptr::null(), std::ptr::null());
         append_log(&format!("self-test: exit {exit_code}"));
+        msg_void(pool, sel("drain"));
+        exit_code
+    }
+}
+
+/// Click-path proof for the settings panel (docs/ARENA-VERIFICATION Path L).
+///
+/// The self-test calls `save_settings_from_panel()` directly — a Rust function
+/// call. This proof instead dispatches Save through the real button action:
+/// `performClick:` is the AppKit dispatch an accessibility press and a mouse
+/// click land on. No synthetic mouse events are used and the event-delivery
+/// layer is not exercised; a strictly manual variant (the owner's hand on the
+/// mouse) remains possible on request. `performClick:` is synchronous: the
+/// whole Save path has run by the time the call returns.
+///
+/// Protective guard: a pre-existing config file is a real owner profile — the
+/// proof skips fail-closed (nothing read, nothing written). A run that starts
+/// without a file may create one through Save and removes it again at the end
+/// (returns to no-file, the same end-state decision as the self-test); a
+/// failed removal fails the proof rather than looking successful.
+///
+/// The app is bootstrapped exactly as the menu app is (NSApplication, action
+/// target, menu, status item), so the button's action dispatch runs inside a
+/// normally wired app, not a stripped test rig.
+///
+/// Exit codes (same semantics as the self-test): 0 pass, 1 proof failure,
+/// 2 skipped.
+pub fn panel_click_proof() -> i32 {
+    let path = match crate::config::config_path() {
+        Ok(path) => path,
+        Err(error) => {
+            append_log(&format!(
+                "panel click proof: config path unavailable: {error}"
+            ));
+            return K_SELF_TEST_EXIT_RESTORE_FAILED;
+        }
+    };
+    if path.exists() {
+        append_log(
+            "panel click proof: skipped (config file pre-exists; refusing to touch a real profile)",
+        );
+        return K_SELF_TEST_EXIT_SKIPPED;
+    }
+    unsafe {
+        // AppKit requires an autorelease pool on the thread that creates
+        // autoreleased objects (same bootstrap as self_test / run()).
+        let pool = msg0(class("NSAutoreleasePool"), sel("new"));
+        let app = msg0(class("NSApplication"), sel("sharedApplication"));
+        assert!(!app.is_null(), "NSApplication unavailable");
+        msg_int(
+            app,
+            sel("setActivationPolicy:"),
+            ffi::NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY,
+        );
+        let target = create_target();
+        assert!(!target.is_null(), "failed to create the action target");
+        STATE.lock().unwrap().config = Some(load_config_or_default());
+        let menu = build_menu(target);
+        let bar = msg0(class("NSStatusBar"), sel("systemStatusBar"));
+        let item = msg_cgfloat(
+            bar,
+            sel("statusItemWithLength:"),
+            ffi::NS_VARIABLE_STATUS_ITEM_LENGTH,
+        );
+        msg_void_id(item, sel("setMenu:"), menu);
+        {
+            let mut state = STATE.lock().unwrap();
+            state.app = Handle(app);
+            state.status_item = Handle(item);
+            state.target = Handle(target);
+        }
+        append_log("panel click proof: app bootstrapped");
+
+        // Open the panel through the same path the menu action uses
+        // (show_settings), then drive Save through the button's real action.
+        show_settings();
+        let panel = STATE.lock().unwrap().settings.expect("panel built");
+        append_log(&format!(
+            "panel click proof: panel visible={}",
+            msg_u8(panel.window.0, sel("isVisible")) != 0
+        ));
+
+        // Round 1: broken rules text + a Save click must be refused and leave
+        // the (absent) config file absent.
+        set_rules_text(panel.rules, r#"[{"pid": 1"#);
+        msg_void_id(panel.save.0, sel("performClick:"), std::ptr::null_mut());
+        let status1 = STATE.lock().unwrap().status.clone();
+        let absent1 = !path.exists();
+        append_log(&format!(
+            "panel click proof: invalid round status={status1:?} file_absent={absent1}"
+        ));
+        let ok1 = status1.starts_with("settings invalid: rules (") && absent1;
+
+        // Round 2: valid rules text + a Save click must save the canonical
+        // body (one bundle rule) with owner-only 0600.
+        set_rules_text(
+            panel.rules,
+            r#"[{"bundle": "com.example.proof", "dialogs": "exclude"}]"#,
+        );
+        msg_void_id(panel.save.0, sel("performClick:"), std::ptr::null_mut());
+        let status2 = STATE.lock().unwrap().status.clone();
+        append_log(&format!(
+            "panel click proof: valid round status={status2:?}"
+        ));
+        let (ok2, detail) = match Config::load() {
+            Ok(config) => {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&path)
+                    .map(|meta| meta.permissions().mode() & 0o777)
+                    .unwrap_or(0);
+                let rules_ok = config.rules.len() == 1
+                    && config.rules[0].bundle.as_deref() == Some("com.example.proof");
+                let mode_ok = crate::config::is_owner_only_mode(mode);
+                (
+                    status2 == "settings saved" && rules_ok && mode_ok,
+                    format!("rules_ok={rules_ok} mode={mode:o} mode_ok={mode_ok}"),
+                )
+            }
+            Err(error) => (false, format!("load failed: {error}")),
+        };
+        append_log(&format!("panel click proof: saved verification {detail}"));
+
+        // Hide the panel so the run leaves no visible window behind, then
+        // clean up: the file this run created returns to absence.
+        msg_void(panel.window.0, sel("orderOut:"));
+        let cleaned = match std::fs::remove_file(&path) {
+            Ok(()) => {
+                append_log("panel click proof: cleanup: removed the file this run created");
+                true
+            }
+            Err(error) => {
+                append_log(&format!("panel click proof: cleanup failed: {error}"));
+                false
+            }
+        };
+        let exit_code = if ok1 && ok2 && cleaned {
+            K_SELF_TEST_EXIT_OK
+        } else {
+            K_SELF_TEST_EXIT_RESTORE_FAILED
+        };
+        append_log(&format!("panel click proof: exit {exit_code}"));
         msg_void(pool, sel("drain"));
         exit_code
     }
