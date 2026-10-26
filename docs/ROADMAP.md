@@ -54,7 +54,7 @@
 ### Shared requirements
 - Auto-tiling only after explicit onboarding opt-in.
 - Mandatory safety exclusions; user-configurable ordinary window rules.
-- Direct-download packaging prototypes; code signing/notarization path tested.
+- Direct-download packaging prototypes; code signing/notarization path tested. *(2026-10-26: prototype started — local unsigned `.app` assembled by `scripts/package-macos.sh` and attached as a CI artifact; the signing/notarization path itself remains open.)*
 
 ## Phase 3 — native workspace capability decision
 
