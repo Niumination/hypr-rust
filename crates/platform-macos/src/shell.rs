@@ -7,16 +7,21 @@
 //!
 //! Auto-tiling stays **off**: nothing is applied unless the user picks a reflow
 //! command. Quit terminates the app and leaves windows at their last
-//! OS-accepted position. The shell never reads window titles and never acts on
-//! a window outside the registered fixture.
+//! OS-accepted position. The shell never reads window titles.
+//!
+//! Two reflow surfaces (ADR-0006): the interactive **menu** command targets
+//! real app windows — every normal window of every regular app on the main
+//! display, strict no-partial — while every **automated** path (`--self-test`,
+//! `--panel-click-proof`) keeps calling the fixture-bound [`perform_reflow`],
+//! so an evidence run can never move an owner's real windows.
 
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::sync::Mutex;
 
-use layout_core::{DisplayId, PlatformSnapshot, Rect};
+use layout_core::{DisplayId, Rect};
 
-use crate::adapter::MacAxAdapter;
+use crate::adapter::{global_window_key, AxError, MacAxAdapter, MacMultiWindowSet};
 use crate::batch;
 use crate::config::{dialog_policy_for, rules_json, Config, ConfigError, DialogPolicy, WindowRule};
 use crate::ffi::{self, CGFloat};
@@ -286,7 +291,10 @@ fn load_config_or_default() -> Config {
 }
 
 extern "C" fn action_reflow(_this: Id, _cmd: Sel) {
-    perform_reflow();
+    // The menu is the non-fixture, owner-driven surface (ADR-0006 §3): it
+    // targets real app windows. Automated evidence keeps calling
+    // `perform_reflow` (fixture-bound) instead.
+    perform_reflow_real();
 }
 
 extern "C" fn action_toggle_pause(_this: Id, _cmd: Sel) {
@@ -820,6 +828,57 @@ fn running_bundle_ids() -> Vec<String> {
         ids.sort();
         ids.dedup();
         ids
+    }
+}
+
+/// Pids of running **regular** apps (`NSApplicationActivationPolicyRegular
+/// == 0`), sorted for deterministic enumeration. Background and agent apps
+/// own no normal windows and are skipped. Only process identifiers and
+/// activation policies are read — never window titles.
+fn regular_app_pids() -> Vec<u32> {
+    unsafe {
+        let workspace = msg0(class("NSWorkspace"), sel("sharedWorkspace"));
+        let apps = msg0(workspace, sel("runningApplications"));
+        if apps.is_null() {
+            return Vec::new();
+        }
+        let count = msg_isize(apps, sel("count"));
+        let mut pids = Vec::new();
+        for index in 0..count.max(0) {
+            let app = msg_id_len(apps, sel("objectAtIndex:"), index as usize);
+            if app.is_null() {
+                continue;
+            }
+            if msg_isize(app, sel("activationPolicy")) != 0 {
+                continue;
+            }
+            let pid = msg_isize(app, sel("processIdentifier"));
+            if pid > 0 {
+                pids.push(pid as u32);
+            }
+        }
+        pids.sort_unstable();
+        pids.dedup();
+        pids
+    }
+}
+
+/// The frontmost app's pid at command time — the master source of ADR-0006
+/// §4 — or `None` when it cannot be read. Only the process identifier is
+/// read.
+fn frontmost_pid() -> Option<u32> {
+    unsafe {
+        let workspace = msg0(class("NSWorkspace"), sel("sharedWorkspace"));
+        let app = msg0(workspace, sel("frontmostApplication"));
+        if app.is_null() {
+            return None;
+        }
+        let pid = msg_isize(app, sel("processIdentifier"));
+        if pid > 0 {
+            Some(pid as u32)
+        } else {
+            None
+        }
     }
 }
 
@@ -1391,6 +1450,20 @@ fn work_area() -> Rect {
     )
 }
 
+/// Main display bounds **including** the menu-bar strip: the membership
+/// space for "this window lives on the main display". [`work_area`] is the
+/// same rectangle minus that strip.
+fn display_bounds() -> Rect {
+    // SAFETY: both are documented CoreGraphics entry points with no state.
+    let bounds = unsafe { ffi::CGDisplayBounds(ffi::CGMainDisplayID()) };
+    Rect::new(
+        bounds.origin.x,
+        bounds.origin.y,
+        bounds.size.width.max(1.0),
+        bounds.size.height.max(1.0),
+    )
+}
+
 /// Per-window rule overrides for one reflow: the app's first matching rule
 /// decides the policy for that app (ADR-0006).
 ///
@@ -1402,13 +1475,15 @@ fn work_area() -> Rect {
 /// - `DialogPolicy::Default` → no overrides; the global `include_dialogs`
 ///   policy in the planner applies unchanged.
 ///
+/// `windows` are the planner IDs of that app's windows in the observation
+/// (local keys for the fixture path, global keys for the merged path).
 /// Mandatory roles never appear as effective overrides (planner gates keep
 /// them excluded regardless; rules cannot unlock mandatory).
 ///
 /// SAFETY: main thread; AppKit query only (bundle id, never titles).
 fn window_rule_overrides(
-    snapshot: &PlatformSnapshot,
     pid: u32,
+    windows: &[layout_core::WindowId],
     rules: &[WindowRule],
 ) -> Vec<layout_core::WindowRuleOverride> {
     let bundle = unsafe { app_bundle_id(pid) };
@@ -1418,11 +1493,10 @@ fn window_rule_overrides(
         // No override: the planner follows the global policy per window.
         DialogPolicy::Default => return Vec::new(),
     };
-    snapshot
-        .windows
+    windows
         .iter()
         .map(|window| layout_core::WindowRuleOverride {
-            window: window.id,
+            window: *window,
             exclude,
             include,
         })
@@ -1472,7 +1546,11 @@ fn perform_reflow() {
         }
     };
     let observation = set.observe(work_area());
-    let window_rules = window_rule_overrides(&observation.snapshot, pid, &rules);
+    let window_ids: Vec<layout_core::WindowId> = set
+        .entries()
+        .map(|(key, _, _)| layout_core::WindowId(key.0))
+        .collect();
+    let window_rules = window_rule_overrides(pid, &window_ids, &rules);
     let plan = match layout_core::plan_snapshot_with_rules(
         &observation.snapshot,
         DisplayId(0),
@@ -1513,6 +1591,185 @@ fn perform_reflow() {
         )
     };
     set_status(&status);
+}
+
+/// Run one explicit reflow over **real app windows** (ADR-0006 scope (a)):
+/// every normal window of every regular app on the main display, applied
+/// with the strict no-partial batch.
+///
+/// The layout, gaps, dialog policy and rules come from the loaded config;
+/// only an explicit user command reaches the batch. Automated evidence
+/// (`--self-test`, `--panel-click-proof`) never calls this function — those
+/// stay bound to the registered fixture via [`perform_reflow`].
+///
+/// Window titles are never read: only AX geometry, roles, minimized flags,
+/// bundle ids and process identifiers.
+fn perform_reflow_real() {
+    if STATE.lock().unwrap().paused {
+        set_status("paused");
+        return;
+    }
+    let (kind, layout, include_dialogs, label, rules) = {
+        let config = current_config();
+        let (kind, layout) = config.plan_config();
+        (
+            kind,
+            layout,
+            config.include_dialogs,
+            config.kind_name().to_string(),
+            config.rules.clone(),
+        )
+    };
+    let adapter = match MacAxAdapter::connect() {
+        Ok(adapter) => adapter,
+        Err(error) => {
+            set_status(&format!("{label}: {error}"));
+            return;
+        }
+    };
+
+    // Preflight - enumerate every regular app before the first write
+    // (ADR-0006 §2.1). `NoWindows` means "this app has no targets" and is
+    // skipped; any other enumeration error refuses the whole operation with
+    // zero writes, naming the app that failed (pid only, never a title).
+    let work = work_area();
+    let display = display_bounds();
+    let mut merged = MacMultiWindowSet::new();
+    let mut window_rules: Vec<layout_core::WindowRuleOverride> = Vec::new();
+    let mut skipped = 0usize;
+    for pid in regular_app_pids() {
+        let mut set = match adapter.windows(pid) {
+            Ok(set) => set,
+            Err(AxError::NoWindows) => continue,
+            Err(error) => {
+                let status = format!(
+                    "{label}: refused before write — app pid={pid}: {error} (0 windows touched)"
+                );
+                append_log(&status);
+                set_status(&status);
+                return;
+            }
+        };
+        skipped += set.drop_non_target_windows(work, display);
+        if set.is_empty() {
+            continue;
+        }
+        // The merged observation re-keys to global ids (pid << 32 | index);
+        // the overrides must name those same ids.
+        let window_ids: Vec<layout_core::WindowId> = set
+            .entries()
+            .map(|(key, _, _)| layout_core::WindowId(global_window_key(pid, key.0).0))
+            .collect();
+        window_rules.extend(window_rule_overrides(pid, &window_ids, &rules));
+        merged.push(set);
+    }
+    if merged.is_empty() {
+        let status = format!("{label}: no target windows");
+        append_log(&status);
+        set_status(&status);
+        return;
+    }
+    // Master (ADR-0006 §4): the window focused at command time — the
+    // frontmost app's focused window, if that app is part of this batch.
+    if let Some(front) = frontmost_pid() {
+        merged.set_focused_pid(front);
+    }
+
+    let observation = merged.observe(work);
+    let plan = match layout_core::plan_snapshot_with_rules(
+        &observation.snapshot,
+        DisplayId(0),
+        kind,
+        layout,
+        include_dialogs,
+        &window_rules,
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            let status = format!("{label}: plan {error:?} (0 windows touched)");
+            append_log(&status);
+            set_status(&status);
+            return;
+        }
+    };
+    let targets = match batch::targets_for_plan(&plan, &observation.map) {
+        Ok(targets) => targets,
+        Err(error) => {
+            let status = format!("{label}: map {error:?} (0 windows touched)");
+            append_log(&status);
+            set_status(&status);
+            return;
+        }
+    };
+    let result = batch::apply_batch_strict(&merged, &targets);
+    let status = strict_status_text(&label, &result, plan.excluded.len(), skipped);
+    append_log(&status);
+    set_status(&status);
+}
+
+/// The ADR-0006 three-way status line: success / clean refusal / loud
+/// partial state. A partial state names the observed frames, is never
+/// phrased as success, and the word "atomic" is never used.
+fn strict_status_text(
+    label: &str,
+    result: &batch::StrictBatchResult,
+    excluded: usize,
+    skipped: usize,
+) -> String {
+    let mut extras = String::new();
+    if excluded > 0 {
+        extras.push_str(&format!(", {excluded} excluded"));
+    }
+    if skipped > 0 {
+        extras.push_str(&format!(
+            ", {skipped} skipped (minimized/fullscreen/off-display)"
+        ));
+    }
+    let error_of = |r: &batch::StrictBatchResult| {
+        r.result
+            .error
+            .as_ref()
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "unknown error".to_string())
+    };
+    match result.status() {
+        batch::StrictStatus::Success => format!(
+            "{label}: tiled {} window(s){extras}",
+            result.result.outcomes.len()
+        ),
+        batch::StrictStatus::CleanRefusal if result.refused_before_write => {
+            format!(
+                "{label}: refused before write ({}) — 0 windows touched{extras}",
+                error_of(result)
+            )
+        }
+        batch::StrictStatus::CleanRefusal => format!(
+            "{label}: refused ({}) — all windows restored{extras}",
+            error_of(result)
+        ),
+        batch::StrictStatus::LoudPartial => {
+            let frames: Vec<String> = result
+                .result
+                .outcomes
+                .iter()
+                .filter_map(|(key, outcome)| match outcome {
+                    batch::WindowOutcome::RolledBack { restored, actual } => Some(format!(
+                        "key {}: restored {restored:?}, observed {}",
+                        key.0,
+                        actual
+                            .map(|frame| format!("{frame:?}"))
+                            .unwrap_or_else(|| "unreadable".to_string())
+                    )),
+                    batch::WindowOutcome::Applied { .. } => None,
+                })
+                .collect();
+            format!(
+                "{label}: PARTIAL STATE ({}) — restore unverified: {}",
+                error_of(result),
+                frames.join("; ")
+            )
+        }
+    }
 }
 
 fn set_status(status: &str) {
@@ -2351,5 +2608,122 @@ mod settings_number_validation_tests {
         ] {
             assert!(!is_json_number(text), "{text:?} should be refused");
         }
+    }
+}
+
+#[cfg(test)]
+mod strict_status_text_tests {
+    use super::strict_status_text;
+    use crate::adapter::{AxError, WindowKey};
+    use crate::batch::{BatchResult, StrictBatchResult, StrictStatus, WindowOutcome};
+    use layout_core::Rect;
+
+    fn success() -> StrictBatchResult {
+        StrictBatchResult {
+            result: BatchResult {
+                outcomes: vec![
+                    (
+                        WindowKey(1),
+                        WindowOutcome::Applied {
+                            requested: Rect::new(10.0, 10.0, 200.0, 100.0),
+                            actual: Rect::new(10.0, 10.0, 200.0, 100.0),
+                        },
+                    ),
+                    (
+                        WindowKey(2),
+                        WindowOutcome::Applied {
+                            requested: Rect::new(220.0, 10.0, 200.0, 100.0),
+                            actual: Rect::new(220.0, 10.0, 200.0, 100.0),
+                        },
+                    ),
+                ],
+                failed_at: None,
+                error: None,
+                rollback_all_restored: true,
+            },
+            refused_before_write: false,
+        }
+    }
+
+    fn refusal(before_write: bool) -> StrictBatchResult {
+        StrictBatchResult {
+            result: BatchResult {
+                outcomes: Vec::new(),
+                failed_at: Some(WindowKey(2)),
+                error: Some(AxError::Failure(-25204)),
+                rollback_all_restored: true,
+            },
+            refused_before_write: before_write,
+        }
+    }
+
+    fn loud_partial() -> StrictBatchResult {
+        StrictBatchResult {
+            result: BatchResult {
+                outcomes: vec![
+                    (
+                        WindowKey(1),
+                        WindowOutcome::RolledBack {
+                            restored: Rect::new(0.0, 0.0, 100.0, 50.0),
+                            actual: None,
+                        },
+                    ),
+                    (
+                        WindowKey(3),
+                        WindowOutcome::RolledBack {
+                            restored: Rect::new(300.0, 0.0, 100.0, 50.0),
+                            actual: Some(Rect::new(300.0, 40.0, 100.0, 50.0)),
+                        },
+                    ),
+                ],
+                failed_at: Some(WindowKey(2)),
+                error: Some(AxError::Failure(-25200)),
+                rollback_all_restored: false,
+            },
+            refused_before_write: false,
+        }
+    }
+
+    #[test]
+    fn success_names_the_applied_count_and_never_claims_atomicity() {
+        let text = strict_status_text("Reflow", &success(), 3, 1);
+        assert!(text.starts_with("Reflow: tiled 2 window(s)"));
+        assert!(text.contains("3 excluded"));
+        assert!(text.contains("1 skipped"));
+        assert!(!text.to_lowercase().contains("atomic"));
+        assert_eq!(success().status(), StrictStatus::Success);
+    }
+
+    #[test]
+    fn preflight_refusal_says_zero_windows_touched() {
+        let text = strict_status_text("Reflow", &refusal(true), 0, 0);
+        assert!(text.contains("refused before write"));
+        assert!(text.contains("0 windows touched"));
+        assert!(!text.to_lowercase().contains("atomic"));
+        assert_eq!(refusal(true).status(), StrictStatus::CleanRefusal);
+    }
+
+    #[test]
+    fn mid_batch_refusal_says_all_windows_restored() {
+        let text = strict_status_text("Reflow", &refusal(false), 2, 0);
+        assert!(text.contains("refused"));
+        assert!(text.contains("all windows restored"));
+        assert!(!text.to_lowercase().contains("atomic"));
+        assert_eq!(refusal(false).status(), StrictStatus::CleanRefusal);
+    }
+
+    #[test]
+    fn loud_partial_names_observed_frames_and_never_reads_as_success() {
+        let text = strict_status_text("Reflow", &loud_partial(), 0, 0);
+        assert!(text.contains("PARTIAL STATE"));
+        assert!(text.contains("restore unverified"));
+        // Every rolled-back key with its observed frame is named honestly.
+        assert!(text.contains("key 1"));
+        assert!(text.contains("unreadable"));
+        assert!(text.contains("key 3"));
+        assert!(text.contains("300.0"));
+        assert!(!text.contains("tiled"));
+        assert!(!text.to_lowercase().contains("atomic"));
+        assert_eq!(loud_partial().status(), StrictStatus::LoudPartial);
     }
 }

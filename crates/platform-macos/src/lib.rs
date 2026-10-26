@@ -15,11 +15,12 @@ pub mod fixture;
 pub mod shell;
 
 pub use adapter::{
-    map_ax_error, observation_from_windows, process_alive, AxError, AxWindow, MacAxAdapter,
-    MacObservation, MacWindowSet, WindowIdMap, WindowKey,
+    global_window_key, map_ax_error, observation_from_windows, process_alive,
+    split_global_window_key, AxError, AxWindow, MacAxAdapter, MacMultiWindowSet, MacObservation,
+    MacWindowSet, WindowIdMap, WindowKey,
 };
 pub use batch::{
-    apply_batch, parse_plan, targets_for_plan, verify_plan_file, BatchOps, BatchResult,
-    BatchTarget, PlanError, WindowOutcome,
+    apply_batch, apply_batch_strict, parse_plan, targets_for_plan, verify_plan_file, BatchOps,
+    BatchResult, BatchTarget, PlanError, StrictBatchResult, StrictStatus, WindowOutcome,
 };
 pub use fixture::FixtureError;

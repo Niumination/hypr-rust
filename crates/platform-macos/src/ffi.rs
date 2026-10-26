@@ -130,6 +130,16 @@ extern "C" {
     /// (non-null) CFTypeRefs.
     pub fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> Boolean;
 
+    /// Type id of any live CF object. Safety: `cf` live, non-null CFTypeRef.
+    pub fn CFGetTypeID(cf: CFTypeRef) -> usize;
+
+    /// Type id of the CFBoolean singleton type. Safety: no arguments.
+    pub fn CFBooleanGetTypeID() -> usize;
+
+    /// Value of a CFBoolean (0 = false, non-zero = true). Safety: `boolean`
+    /// must be a live CFBooleanRef.
+    pub fn CFBooleanGetValue(boolean: CFTypeRef) -> Boolean;
+
     /// Copy a CFString's bytes into a caller buffer. `size` is the buffer
     /// capacity in bytes; the result is UTF-8 plus a terminating NUL.
     /// Returns false when the buffer was too small or the string invalid.

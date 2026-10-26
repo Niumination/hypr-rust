@@ -1,7 +1,7 @@
 # Hypr-Rust — Engineering Documentation
 
-**Status:** Interview baseline; native macOS M1/M2 single-window proof + native batch multi-window with best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)) + menu-bar shell and settings panel with a row-based rules editor (host-bound) + a local unsigned `.app` bundle script  
-**Document date:** 2026-10-17 (updated 2026-10-26)  
+**Status:** Interview baseline; native macOS M1/M2 single-window proof + native batch multi-window with best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)) + menu-bar shell and settings panel with a row-based rules editor (host-bound) + real-window reflow scope and strict no-partial semantics recorded ([ADR-0006](./adr/0006-real-window-reflow-strict-no-partial.md)) + a local unsigned `.app` bundle script  
+**Document date:** 2026-10-17 (updated 2026-10-27)  
 **Working name:** Hypr-Rust (placeholder; do not imply affiliation with Hyprland)
 
 ## Executive summary
@@ -15,7 +15,7 @@ Build a Rust application that reproduces the *tiling workflow and user-facing co
 - **Workspace:** native Windows Virtual Desktop/macOS Spaces only, optional per platform and gated by proof using public APIs. Never emulate with minimize/hide. If unsupported, disable the workspace feature on that platform and explain why.
 - **Explicitly out of scope for MVP:** replacement display server/compositor; Wayland protocol hosting on Windows/macOS; universal interception of every app; pixel-identical Hyprland rendering/effects; Linux support unless separately approved.
 
-The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md); shared core/platform adapters in [ADR-0002](./adr/0002-core-and-platform-adapters.md); the native-workspace no-emulation policy in [ADR-0003](./adr/0003-native-workspaces.md); and the batch multi-window best-effort rollback decision in [ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md). The PRD records interview decisions; the other documents define architecture, REA-assisted research, validation and staged delivery.
+The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md); shared core/platform adapters in [ADR-0002](./adr/0002-core-and-platform-adapters.md); the native-workspace no-emulation policy in [ADR-0003](./adr/0003-native-workspaces.md); the batch multi-window best-effort rollback decision in [ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md); and the real-window reflow scope (all normal windows) with strict no-partial application in [ADR-0006](./adr/0006-real-window-reflow-strict-no-partial.md). The PRD records interview decisions; the other documents define architecture, REA-assisted research, validation and staged delivery.
 
 ## Document map
 
