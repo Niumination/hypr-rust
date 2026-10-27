@@ -1952,13 +1952,13 @@ pub fn run() {
         // Load the config before building the menu so the menu reflects it.
         STATE.lock().unwrap().config = Some(load_config_or_default());
 
-        // ADR-0007: global hotkey ⌃⌥⌘R — the same action as the menu's
+        // ADR-0007: global hotkey ⌥⌘R — the same action as the menu's
         // reflow (`perform_reflow_real`), registered once here in `run()`
         // only; the fixture-bound automated paths never reach this line.
         // Fail-soft: a chord conflict logs and leaves the menu as the
         // working surface.
         match crate::hotkey::register(perform_reflow_real) {
-            Ok(()) => append_log("hotkey: registered ⌃⌥⌘R (reflow)"),
+            Ok(()) => append_log("hotkey: registered ⌥⌘R (reflow)"),
             Err(error) => append_log(&format!(
                 "hotkey: not registered — {error}; menu reflow still works"
             )),
