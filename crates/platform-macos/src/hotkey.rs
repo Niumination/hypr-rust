@@ -184,9 +184,27 @@ extern "C" fn on_hotkey_event(
             &mut id as *mut ffi::EventHotKeyID as *mut c_void,
         )
     };
-    if status != ffi::OSSTATUS_NO_ERR || id.signature != SIGNATURE || id.id != REFLOW_HOTKEY_ID {
+    if status != ffi::OSSTATUS_NO_ERR {
+        // A press reached the handler but its id parameter could not be
+        // read — trace it so a silent chord press is diagnosable from the
+        // log (host evidence, ADR-0007).
+        crate::shell::append_log(&format!(
+            "hotkey: pressed but parameter unreadable ({})",
+            describe_status(status)
+        ));
         return ffi::OSSTATUS_EVENT_NOT_HANDLED;
     }
+    if id.signature != SIGNATURE || id.id != REFLOW_HOTKEY_ID {
+        // Not one of ours (should not occur: only our chord is registered).
+        crate::shell::append_log(&format!(
+            "hotkey: foreign id ignored (signature {:#010x}, id {})",
+            id.signature, id.id
+        ));
+        return ffi::OSSTATUS_EVENT_NOT_HANDLED;
+    }
+    // Trace first: if the reflow line never follows, dispatch is the culprit
+    // and the log still shows the press arrived.
+    crate::shell::append_log("hotkey: ⌃⌥⌘R pressed — dispatching reflow");
     match *ON_PRESS.lock().unwrap() {
         Some(on_press) => {
             on_press();
