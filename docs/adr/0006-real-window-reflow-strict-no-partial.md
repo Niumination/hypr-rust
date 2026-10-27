@@ -1,6 +1,6 @@
 # ADR-0006: Real-Window Reflow Scope (All Normal Windows) With Strict No-Partial Application
 
-- **Status:** Accepted (owner decision; fulfils the ADR-0005 addendum's "productization needs a new decision")
+- **Status:** Accepted (owner decision; fulfils the ADR-0005 addendum's "productization needs a new decision"); **§2.1 amended 2026-10-27** (enumeration retry + skip-and-name, owner decision after the first real-window run)
 - **Date:** 2026-10-27
 - **Decision owners:** Product + owner
 - **Relates to:** [ADR-0005](./0005-batch-multiwindow-best-effort-rollback.md) (fixture-bound status quo), [ADR-0004](./0004-batch-multiwindow-deferred-no-partial.md) (superseded), [ADR-0001](./0001-product-boundary.md)
@@ -55,6 +55,20 @@ written and verified**. Otherwise:
 1. **Preflight before the first write**: enumerate the target apps, read every target
    frame, and build the full plan before any mutation. Any enumeration or read failure
    refuses the operation with **zero writes**.
+   - **Amended 2026-10-27 (owner decision, after the first real-window run).** The
+     original wording made the whole reflow refuse whenever *any* regular app failed
+     enumeration; the first host run hit transient `-25204 cannotComplete` timeouts
+     from busy apps (Nicegram Desktop, System Settings while the TCC panel was open),
+     so the command became a lottery. The amendment:
+     - an app-level enumeration failure is **retried once**;
+     - an app that still fails is **skipped and named in the status**
+       (`unavailable skipped: pid …`) instead of refusing the whole operation;
+     - the strict contract is unchanged for everything that remains: targets are
+       built only from successfully read windows (a skip writes nothing), a **target**
+       read failure still refuses with **zero writes**, and per-window writes,
+       rollback and three-way reporting are untouched.
+     The amendment narrows *which* failures refuse (app-level, not target-level); it
+     never turns a partial result into a success.
 2. **Per-window verified writes** (the existing single-window no-partial contract:
    geometry preflight, save, position+size write, read-back compare, self-restore on
    any failure), in plan order; the first failure stops the batch.
@@ -103,8 +117,9 @@ window.
 - Strict no-partial is a product promise, not a platform guarantee: an unverifiable
   restore after a genuine mid-batch failure surfaces as a loud partial-state status
   the owner must act on (the residual race is proven, Paths F–H).
-- More refusals: an app that cannot be enumerated or whose window cannot be read
-  blocks the whole reflow (before any write).
+- More refusals: a target window that cannot be read still blocks the whole reflow
+  (before any write); an app-level enumeration failure now skips and names the app
+  instead (§2.1 amendment, 2026-10-27), so one busy app no longer vetoes the command.
 - Windows of every regular app move in one batch — mis-chosen state (e.g. a window the
   owner expected to stay) is restored only by an explicit follow-up command, not
   automatically.

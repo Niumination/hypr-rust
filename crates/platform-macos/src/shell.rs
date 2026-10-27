@@ -1629,26 +1629,37 @@ fn perform_reflow_real() {
     };
 
     // Preflight - enumerate every regular app before the first write
-    // (ADR-0006 §2.1). `NoWindows` means "this app has no targets" and is
-    // skipped; any other enumeration error refuses the whole operation with
-    // zero writes, naming the app that failed (pid only, never a title).
+    // (ADR-0006 §2.1, amended 2026-10-27). `NoWindows` means "this app has
+    // no targets" and is skipped; any other enumeration error is retried
+    // once and, if it persists, the app is skipped and named in the status
+    // (`unavailable skipped: pid …`) — a skip writes nothing. Target-level
+    // read failures still refuse with zero writes inside the strict batch.
     let work = work_area();
     let display = display_bounds();
     let mut merged = MacMultiWindowSet::new();
     let mut window_rules: Vec<layout_core::WindowRuleOverride> = Vec::new();
     let mut skipped = 0usize;
+    let mut unavailable: Vec<u32> = Vec::new();
     for pid in regular_app_pids() {
+        // ADR-0006 §2.1 (amended 2026-10-27): retry an app-level
+        // enumeration failure once — a transient `-25204 cannotComplete`
+        // from a busy app must not veto the whole command — then skip the
+        // app and name it in the status. Skipping writes nothing: targets
+        // are built only from windows that were read successfully, and
+        // target-level read/write failures stay strict below.
         let mut set = match adapter.windows(pid) {
             Ok(set) => set,
             Err(AxError::NoWindows) => continue,
-            Err(error) => {
-                let status = format!(
-                    "{label}: refused before write — app pid={pid}: {error} (0 windows touched)"
-                );
-                append_log(&status);
-                set_status(&status);
-                return;
-            }
+            Err(first) => match adapter.windows(pid) {
+                Ok(set) => set,
+                Err(_) => {
+                    append_log(&format!(
+                        "{label}: app pid={pid} unavailable after retry ({first})"
+                    ));
+                    unavailable.push(pid);
+                    continue;
+                }
+            },
         };
         skipped += set.drop_non_target_windows(work, display);
         if set.is_empty() {
@@ -1664,7 +1675,8 @@ fn perform_reflow_real() {
         merged.push(set);
     }
     if merged.is_empty() {
-        let status = format!("{label}: no target windows");
+        let mut status = format!("{label}: no target windows");
+        push_unavailable(&mut status, &unavailable);
         append_log(&status);
         set_status(&status);
         return;
@@ -1702,9 +1714,26 @@ fn perform_reflow_real() {
         }
     };
     let result = batch::apply_batch_strict(&merged, &targets);
-    let status = strict_status_text(&label, &result, plan.excluded.len(), skipped);
+    let mut status = strict_status_text(&label, &result, plan.excluded.len(), skipped);
+    push_unavailable(&mut status, &unavailable);
     append_log(&status);
     set_status(&status);
+}
+
+/// Name the apps the enumeration skipped after the §2.1 amendment's retry
+/// (ADR-0006): pids only — never a window title.
+fn push_unavailable(status: &mut String, unavailable: &[u32]) {
+    if unavailable.is_empty() {
+        return;
+    }
+    status.push_str(&format!(
+        ", unavailable skipped: pid {}",
+        unavailable
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
 }
 
 /// The ADR-0006 three-way status line: success / clean refusal / loud
@@ -2613,7 +2642,7 @@ mod settings_number_validation_tests {
 
 #[cfg(test)]
 mod strict_status_text_tests {
-    use super::strict_status_text;
+    use super::{push_unavailable, strict_status_text};
     use crate::adapter::{AxError, WindowKey};
     use crate::batch::{BatchResult, StrictBatchResult, StrictStatus, WindowOutcome};
     use layout_core::Rect;
@@ -2725,5 +2754,18 @@ mod strict_status_text_tests {
         assert!(!text.contains("tiled"));
         assert!(!text.to_lowercase().contains("atomic"));
         assert_eq!(loud_partial().status(), StrictStatus::LoudPartial);
+    }
+
+    #[test]
+    fn unavailable_apps_are_named_by_pid_and_absent_stays_clean() {
+        // §2.1 amendment: skipped apps appear by pid in any status line…
+        let mut text = strict_status_text("Reflow", &success(), 1, 0);
+        push_unavailable(&mut text, &[477, 63181]);
+        assert!(text.contains(", unavailable skipped: pid 477, 63181"));
+        assert!(text.starts_with("Reflow: tiled"));
+        // …and with no skipped app the line is untouched.
+        let mut clean = strict_status_text("Reflow", &success(), 0, 0);
+        push_unavailable(&mut clean, &[]);
+        assert!(!clean.contains("unavailable"));
     }
 }
