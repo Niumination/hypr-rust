@@ -21,7 +21,9 @@ use std::sync::Mutex;
 
 use layout_core::{DisplayId, Rect};
 
-use crate::adapter::{global_window_key, AxError, MacAxAdapter, MacMultiWindowSet};
+use crate::adapter::{
+    global_window_key, split_global_window_key, AxError, MacAxAdapter, MacMultiWindowSet,
+};
 use crate::batch;
 use crate::config::{dialog_policy_for, rules_json, Config, ConfigError, DialogPolicy, WindowRule};
 use crate::ffi::{self, CGFloat};
@@ -1736,6 +1738,23 @@ fn push_unavailable(status: &mut String, unavailable: &[u32]) {
     ));
 }
 
+/// Name the batch's failing window for a status line: an app pid plus its
+/// local window index for a global key (`pid << 32 | index`), or the raw key
+/// otherwise. Pids only — never a window title (ADR-0006 §2).
+fn failed_at_note(result: &batch::StrictBatchResult) -> String {
+    match result.result.failed_at {
+        Some(key) => {
+            let (pid, local) = split_global_window_key(key);
+            if pid == 0 {
+                format!("; failed at key {}", key.0)
+            } else {
+                format!("; failed at app pid {pid} (window {local})")
+            }
+        }
+        None => String::new(),
+    }
+}
+
 /// The ADR-0006 three-way status line: success / clean refusal / loud
 /// partial state. A partial state names the observed frames, is never
 /// phrased as success, and the word "atomic" is never used.
@@ -1754,6 +1773,7 @@ fn strict_status_text(
             ", {skipped} skipped (minimized/fullscreen/off-display)"
         ));
     }
+    let failed = failed_at_note(result);
     let error_of = |r: &batch::StrictBatchResult| {
         r.result
             .error
@@ -1768,12 +1788,12 @@ fn strict_status_text(
         ),
         batch::StrictStatus::CleanRefusal if result.refused_before_write => {
             format!(
-                "{label}: refused before write ({}) — 0 windows touched{extras}",
+                "{label}: refused before write ({}) — 0 windows touched{failed}{extras}",
                 error_of(result)
             )
         }
         batch::StrictStatus::CleanRefusal => format!(
-            "{label}: refused ({}) — all windows restored{extras}",
+            "{label}: refused ({}) — all windows restored{failed}{extras}",
             error_of(result)
         ),
         batch::StrictStatus::LoudPartial => {
@@ -2737,8 +2757,26 @@ mod strict_status_text_tests {
         let text = strict_status_text("Reflow", &refusal(false), 2, 0);
         assert!(text.contains("refused"));
         assert!(text.contains("all windows restored"));
+        // A non-global key (no pid) names the raw key, never invents an app.
+        assert!(text.contains("failed at key 2"));
         assert!(!text.to_lowercase().contains("atomic"));
         assert_eq!(refusal(false).status(), StrictStatus::CleanRefusal);
+    }
+
+    #[test]
+    fn clean_refusal_names_the_failing_app_by_pid() {
+        // The real host run: a global key (pid << 32 | index) must surface
+        // the app pid so a clamping app can be excluded by rules.
+        let mut failed = refusal(false);
+        failed.result.failed_at = Some(crate::adapter::global_window_key(477, 1));
+        let text = strict_status_text("Reflow", &failed, 0, 0);
+        assert!(text.contains("failed at app pid 477 (window 1)"));
+        // The preflight refusal names it too.
+        let mut before = refusal(true);
+        before.result.failed_at = Some(crate::adapter::global_window_key(63181, 0));
+        let text = strict_status_text("Reflow", &before, 0, 0);
+        assert!(text.contains("failed at app pid 63181 (window 0)"));
+        assert!(text.contains("0 windows touched"));
     }
 
     #[test]
