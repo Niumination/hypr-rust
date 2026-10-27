@@ -512,6 +512,11 @@ extern "C" fn action_diagnostics(_this: Id, _cmd: Sel) {
 }
 
 extern "C" fn action_quit(_this: Id, _cmd: Sel) {
+    // ADR-0007: release the hotkey refs before the app goes away (the OS
+    // would free them at exit anyway; explicit teardown keeps it honest).
+    if let Some(error) = crate::hotkey::unregister() {
+        append_log(&format!("hotkey: quit teardown: {error}"));
+    }
     let app = STATE.lock().unwrap().app;
     if !app.is_null() {
         // SAFETY: `app` is the live NSApplication instance.
@@ -1946,6 +1951,18 @@ pub fn run() {
 
         // Load the config before building the menu so the menu reflects it.
         STATE.lock().unwrap().config = Some(load_config_or_default());
+
+        // ADR-0007: global hotkey ⌃⌥⌘R — the same action as the menu's
+        // reflow (`perform_reflow_real`), registered once here in `run()`
+        // only; the fixture-bound automated paths never reach this line.
+        // Fail-soft: a chord conflict logs and leaves the menu as the
+        // working surface.
+        match crate::hotkey::register(perform_reflow_real) {
+            Ok(()) => append_log("hotkey: registered ⌃⌥⌘R (reflow)"),
+            Err(error) => append_log(&format!(
+                "hotkey: not registered — {error}; menu reflow still works"
+            )),
+        }
 
         let bar = msg0(class("NSStatusBar"), sel("systemStatusBar"));
         let item = msg_cgfloat(
