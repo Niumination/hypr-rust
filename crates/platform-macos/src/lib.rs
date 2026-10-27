@@ -4,14 +4,16 @@
 //! for `Rect` and contains all Apple-framework `unsafe` FFI behind a small
 //! safe API. See `docs/MACOS-TAHOE-NEXT-STAGE.md` for scope and acceptance.
 //!
-//! `unsafe` is confined to `ffi.rs` (raw declarations) and `adapter.rs`
-//! (documented wrappers); no other module contains unsafe blocks.
+//! `unsafe` is confined to `ffi.rs` (raw declarations), `adapter.rs`
+//! (documented wrappers), `shell.rs` (Objective-C messaging) and `hotkey.rs`
+//! (Carbon hotkey handler); no other module contains unsafe blocks.
 
 pub mod adapter;
 pub mod batch;
 pub mod config;
 pub mod ffi;
 pub mod fixture;
+pub mod hotkey;
 pub mod shell;
 
 pub use adapter::{

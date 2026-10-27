@@ -277,3 +277,126 @@ pub fn cf_string_from_static(text: &[u8]) -> CFStringRef {
         )
     }
 }
+
+// MARK: - Carbon Event Manager (global hotkey, ADR-0007)
+
+/// Opaque Carbon event-manager refs (`EventTargetRef`, `EventRef`,
+/// `EventHandlerCallRef`, `EventHandlerRef`, `EventHotKeyRef`). Ownership:
+/// `GetApplicationEventTarget` returns the process-lifetime target (not
+/// released by us); `InstallEventHandler`/`RegisterEventHotKey` return refs
+/// released with `RemoveEventHandler`/`UnregisterEventHotKey`.
+pub type EventRef = *mut c_void;
+pub type EventHandlerCallRef = *mut c_void;
+pub type EventTargetRef = *mut c_void;
+pub type EventHandlerRef = *mut c_void;
+pub type EventHotKeyRef = *mut c_void;
+
+/// `OSStatus` (MacTypes.h) — `noErr = 0`, negatives are errors.
+pub type OSStatus = i32;
+/// `OptionBits` (MacTypes.h).
+pub type OptionBits = u32;
+
+/// `kEventClassKeyboard = 'keyb'` (CarbonEvents.h, big-endian four-char).
+pub const K_EVENT_CLASS_KEYBOARD: u32 = 0x6B65_7962;
+/// `kEventHotKeyPressed = 5` (CarbonEvents.h).
+pub const K_EVENT_HOT_KEY_PRESSED: u32 = 5;
+/// `kEventParamDirectObject = '----'` — where the pressed event carries the
+/// `EventHotKeyID` (CarbonEvents.h).
+pub const K_EVENT_PARAM_DIRECT_OBJECT: u32 = 0x2D2D_2D2D;
+/// `typeEventHotKeyID = 'hkid'` (CarbonEvents.h).
+pub const K_TYPE_EVENT_HOT_KEY_ID: u32 = 0x686B_6964;
+/// `eventHotKeyExistsErr = -9878` (MacErrors.h): the chord is already
+/// registered by this or another process — the conflict case (ADR-0007 §3).
+pub const OSSTATUS_EVENT_HOT_KEY_EXISTS: OSStatus = -9878;
+/// `eventNotHandledErr = -9874` (MacErrors.h): handler declines the event.
+pub const OSSTATUS_EVENT_NOT_HANDLED: OSStatus = -9874;
+/// `noErr` (MacTypes.h).
+pub const OSSTATUS_NO_ERR: OSStatus = 0;
+
+// Carbon virtual key/modifier codes (Events.h / CarbonEvents.h): the
+// modifiers are a bitfield, not a small enum — control 4096 | option 2048 |
+// cmd 256; `kVK_ANSI_R = 0x0F`.
+pub const K_MOD_CONTROL: u32 = 4096;
+pub const K_MOD_OPTION: u32 = 2048;
+pub const K_MOD_COMMAND: u32 = 256;
+/// `kVK_ANSI_R` (Events.h).
+pub const K_VK_ANSI_R: u32 = 0x0F;
+
+/// `EventHotKeyID` (CarbonEvents.h): signature identifies our application,
+/// id identifies which of our hotkeys fired. Passed **by value** to
+/// `RegisterEventHotKey` and read back from the event by value.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EventHotKeyID {
+    pub signature: u32,
+    pub id: u32,
+}
+
+/// `EventTypeSpec` (CarbonEvents.h): event class + kind filter.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct EventTypeSpec {
+    pub class: u32,
+    pub kind: u32,
+}
+
+/// `EventHandlerUPP` in 64-bit Carbon is a plain function pointer
+/// (CarbonEvents.h): handler, event, user data passed to `InstallEventHandler`.
+pub type EventHandlerUPP = extern "C" fn(EventHandlerCallRef, EventRef, *mut c_void) -> OSStatus;
+
+#[link(name = "Carbon", kind = "framework")]
+extern "C" {
+    /// The process's application event target (not owned; process lifetime).
+    pub fn GetApplicationEventTarget() -> EventTargetRef;
+
+    /// Install a handler on the application target. `inNumTypes`/`inList`
+    /// filter the classes; `outRef` receives an owned ref for
+    /// `RemoveEventHandler`. Safety: `handler` must stay valid until removed.
+    /// `ItemCount` is 64-bit (`unsigned long`) on modern macOS.
+    pub fn InstallEventHandler(
+        target: EventTargetRef,
+        handler: EventHandlerUPP,
+        num_types: u64,
+        types: *const EventTypeSpec,
+        user_data: *mut c_void,
+        out_ref: *mut EventHandlerRef,
+    ) -> OSStatus;
+
+    /// Remove a handler previously returned via `out_ref`. Safety: `handler`
+    /// must be a live ref; using it afterwards is undefined.
+    pub fn RemoveEventHandler(handler: EventHandlerRef) -> OSStatus;
+
+    /// Claim a system-wide hotkey chord. The chord is intercepted **before**
+    /// the frontmost app sees it. Returns `eventHotKeyExistsErr` when the
+    /// chord is taken. Safety: `out_ref` receives an owned ref for
+    /// `UnregisterEventHotKey`.
+    pub fn RegisterEventHotKey(
+        key_code: u32,
+        modifiers: u32,
+        id: EventHotKeyID,
+        target: EventTargetRef,
+        options: OptionBits,
+        out_ref: *mut EventHotKeyRef,
+    ) -> OSStatus;
+
+    /// Release a hotkey ref from `RegisterEventHotKey`. Safety: `hotkey`
+    /// must be a live ref; using it afterwards is undefined.
+    pub fn UnregisterEventHotKey(hotkey: EventHotKeyRef) -> OSStatus;
+
+    /// Copy a parameter out of an event. Argument order per Carbon Event
+    /// Manager Reference: `outActualType` and `outActualSize` may be null;
+    /// `inBufferSize` (`ByteCount`, 64-bit `unsigned long`) is the size of
+    /// `buf` and `outActualSize` receives the parameter's real size.
+    /// Safety: `event` is a live event owned by the runtime; `buf` must be
+    /// valid for `buf_size` bytes (16 bytes for `hkid` + padding as
+    /// `size_of::<EventHotKeyID>()`).
+    pub fn GetEventParameter(
+        event: EventRef,
+        name: u32,
+        desired_type: u32,
+        actual_type: *mut u32,
+        buffer_size: u64,
+        actual_size: *mut u64,
+        buf: *mut c_void,
+    ) -> OSStatus;
+}
