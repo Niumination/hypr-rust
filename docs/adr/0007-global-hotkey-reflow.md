@@ -1,6 +1,6 @@
-# ADR-0007: Global Hotkey for Reflow (⌃⌥⌘R) via the Carbon Event Manager
+# ADR-0007: Global Hotkey for Reflow (⌥⌘R) via the Carbon Event Manager
 
-- **Status:** Accepted (owner decision 2026-10-27, choosing roadmap item "global hotkeys" alongside auto-tiling as the next slice)
+- **Status:** Accepted (owner decision 2026-10-27, choosing roadmap item "global hotkeys" alongside auto-tiling as the next slice); **amended 2026-10-28** — chord ⌃⌥⌘R → ⌥⌘R (owner decision, host evidence, see §1 amendment)
 - **Date:** 2026-10-27
 - **Decision owners:** Product + owner
 - **Relates to:** [ADR-0006](./0006-real-window-reflow-strict-no-partial.md) (the reflow command this hotkey triggers), [ADR-0001](./0001-product-boundary.md), docs/M2-KEYBOARD-PLAN.md (whose "no global hotkey" rule was **scope-bound to M2** and is superseded here for the shell surface)
@@ -21,18 +21,36 @@ opens the feature.
 
 ### 1. One hotkey, one action
 
-- **⌃⌥⌘R** (control + option + command + `R`; Carbon key code `kVK_ANSI_R = 0x0F`,
-  modifiers `controlKey|optionKey|cmdKey = 4096|2048|256`) triggers **exactly the same
+- **⌥⌘R** (option + command + `R`; Carbon key code `kVK_ANSI_R = 0x0F`,
+  modifiers `optionKey|cmdKey = 2048|256 = 2304`) triggers **exactly the same
   action as the menu's current-layout reflow**: `perform_reflow_real`. Same preflight,
   same strict no-partial contract, same three-way status line, same log format, same
   paused gate. There is no second code path and no separate semantics.
 - The chord was chosen deliberately: `RegisterEventHotKey` intercepts the chord
   **system-wide before the frontmost app sees it**, so an everyday chord (e.g. ⌘⇧R,
-  browser reload) would be hijacked while the shell runs. ⌃⌥⌘R is unlikely to collide
-  with any app's own shortcut.
+  browser reload) would be hijacked while the shell runs. ⌥⌘R is unlikely to collide
+  with any app's own shortcut (and any collision stays fail-soft per §3).
 - One press = one reflow attempt (one-shot). **No loop, no daemon, no auto-tiling** —
   ADR-0006's "nothing is applied unless the user picks a reflow command" still holds;
   a hotkey press *is* an explicit user command.
+
+**Amendment (2026-10-28, owner): chord ⌃⌥⌘R → ⌥⌘R.** The chord accepted on
+2026-10-27 (⌃⌥⌘R, `controlKey|optionKey|cmdKey = 4096|2048|256`) **never once
+matched on the owner's machine** — zero press lines in the shell log across every
+attempt. Read-only host probes (timestamped `CGEventSourceFlagsState` sessions,
+2026-10-27/28) found the root cause **outside ax-shell**: whenever ⌃ is pressed
+**together with another modifier**, the HID system reports the `shift` bit instead
+of `ctrl` (`alt+shift` and `alt+shift+cmd` recorded during ⌃⌥ / ⌃⌥⌘ instructions),
+so any chord containing ⌃ plus another modifier can never match on this keyboard
+(internal ThinkPad PS/2 unit, VoodooPS2Controller 2.3.8; no software remap —
+`hidutil` `UserKeyMapping` empty, no modifier-mapping plist). The replacement was
+proven end-to-end on this machine **before** the code changed: a throwaway C
+listener on the same Carbon API registered ⌥⌘R (`RegisterEventHotKey` returned
+`0`, chord free of conflicts) and logged `FIRED … (⌥⌘R)` 14 times with HID flags
+`alt=1 cmd=1` on every press — HID → match → dispatch all alive. ⌥⌘R also avoids
+claiming a lone Option chord (⌥R alone would swallow `®` in editors) and does not
+collide with browser reload (⌘R). ⌥R / ⌃R remain one-constant swaps should the
+owner prefer a different chord later. **Everything else in this ADR is unchanged.**
 
 ### 2. Public API only: Carbon Event Manager
 
@@ -70,7 +88,7 @@ opens the feature.
 - The roadmap's "global hotkeys" item is satisfied for the reflow command; configurable
   chords, per-layout hotkeys and a conflict-resolution UI are **out of scope** for now
   (a fixed platform-default chord with conflict reporting is the roadmap requirement).
-- Pressing ⌃⌥⌘R anywhere consumes that chord system-wide while ax-shell runs — accepted,
+- Pressing ⌥⌘R anywhere consumes that chord system-wide while ax-shell runs — accepted,
   and why the chord is an unusual combination.
 - If a future macOS build deprecates `RegisterEventHotKey`, the fallback decision (e.g.
   `CGEventTap` + its Input Monitoring prompt, or per-app `NSEvent` monitors) needs its

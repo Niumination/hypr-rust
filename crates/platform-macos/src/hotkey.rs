@@ -1,6 +1,6 @@
 //! Global hotkey for reflow — [ADR-0007](../../docs/adr/0007-global-hotkey-reflow.md).
 //!
-//! One chord (**⌃⌥⌘R**) registered once at shell startup through the Carbon
+//! One chord (**⌥⌘R**) registered once at shell startup through the Carbon
 //! Event Manager's public `RegisterEventHotKey` API (no new TCC permission,
 //! no crate dependency). A press dispatches the exact callback the caller
 //! passes — the shell passes `perform_reflow_real`, so a hotkey press and a
@@ -44,14 +44,15 @@ unsafe impl Send for Registered {}
 static REGISTERED: Mutex<Option<Registered>> = Mutex::new(None);
 static ON_PRESS: Mutex<Option<fn()>> = Mutex::new(None);
 
-/// The reflow chord: `⌃⌥⌘R` as `(key_code, modifiers)` —
-/// `kVK_ANSI_R` plus `controlKey | optionKey | cmdKey`
-/// (4096 | 2048 | 256 = 6400). Pure; unit-tested.
+/// The reflow chord: `⌥⌘R` as `(key_code, modifiers)` —
+/// `kVK_ANSI_R` plus `optionKey | cmdKey` (2048 | 256 = 2304).
+///
+/// Deliberately **no control bit** (ADR-0007 amendment 2026-10-28): on the
+/// owner's keyboard (internal ThinkPad PS/2) ⌃ pressed together with another
+/// modifier reaches HID as *shift*, so a chord containing ⌃ can never match
+/// there. Pure; unit-tested.
 pub fn reflow_chord() -> (u32, u32) {
-    (
-        ffi::K_VK_ANSI_R,
-        ffi::K_MOD_CONTROL | ffi::K_MOD_OPTION | ffi::K_MOD_COMMAND,
-    )
+    (ffi::K_VK_ANSI_R, ffi::K_MOD_OPTION | ffi::K_MOD_COMMAND)
 }
 
 /// Human-readable report for a registration `OSStatus`. The conflict case
@@ -204,7 +205,7 @@ extern "C" fn on_hotkey_event(
     }
     // Trace first: if the reflow line never follows, dispatch is the culprit
     // and the log still shows the press arrived.
-    crate::shell::append_log("hotkey: ⌃⌥⌘R pressed — dispatching reflow");
+    crate::shell::append_log("hotkey: ⌥⌘R pressed — dispatching reflow");
     match *ON_PRESS.lock().unwrap() {
         Some(on_press) => {
             on_press();
@@ -220,14 +221,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reflow_chord_is_control_option_command_r() {
+    fn reflow_chord_is_option_command_r() {
         let (code, modifiers) = reflow_chord();
         // kVK_ANSI_R = 0x0F (Events.h).
         assert_eq!(code, 0x0F);
-        // controlKey 4096 | optionKey 2048 | cmdKey 256 (Events.h bits).
-        assert_eq!(modifiers, 4096 | 2048 | 256);
-        assert_eq!(modifiers, 6400);
-        // No shift: the chord must not depend on Caps-Lock-adjacent bits.
+        // optionKey 2048 | cmdKey 256 (Events.h bits).
+        assert_eq!(modifiers, 2048 | 256);
+        assert_eq!(modifiers, 2304);
+        // No control: ⌃ combined with another modifier arrives at HID as
+        // shift on the owner's keyboard, so a control chord can never match
+        // (ADR-0007 amendment 2026-10-28).
+        assert_eq!(modifiers & ffi::K_MOD_CONTROL, 0);
+        // No shift either: the chord must not depend on Caps-Lock-adjacent bits.
         assert_eq!(modifiers & 512, 0);
     }
 
