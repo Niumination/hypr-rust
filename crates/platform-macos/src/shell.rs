@@ -1423,7 +1423,7 @@ fn fmt_num(value: f64) -> String {
 
 /// Append a line to the shell log. Best-effort: a log failure is never fatal
 /// and never affects window state.
-fn append_log(line: &str) {
+pub(crate) fn append_log(line: &str) {
     use std::io::Write;
     if let Some(home) = std::env::var_os("HOME") {
         let path = std::path::Path::new(&home)
