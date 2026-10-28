@@ -13,6 +13,11 @@ pub type CFTypeRef = *const c_void;
 pub type CFStringRef = *const c_void;
 pub type AXUIElementRef = *const c_void;
 pub type AXValueRef = *const c_void;
+/// Opaque Accessibility observer ref (a CFType; released with CFRelease).
+pub type AXObserverRef = *const c_void;
+/// Opaque CoreFoundation run-loop refs (borrowed where noted per function).
+pub type CFRunLoopRef = *const c_void;
+pub type CFRunLoopSourceRef = *const c_void;
 
 /// Darwin `Boolean` (0 = false, non-zero = true).
 pub type Boolean = u8;
@@ -76,6 +81,46 @@ extern "C" {
     /// Create an AXValue wrapping a CGPoint/CGSize. Safety: `value` must
     /// point to data matching `ax_type`; returns an owned ref or null.
     pub fn AXValueCreate(ax_type: c_int, value: *const c_void) -> AXValueRef;
+
+    /// Create an AX observer for the app with pid `application`
+    /// (AXUIElement.h `AXObserverCreate`). On success `out` receives an
+    /// owned ref (CF_RETURNS_RETAINED — CFRelease). AXError code
+    /// (0 = success). Safety: `callback` must be a valid `extern "C"`
+    /// function that outlives the observer; `out` a valid out-pointer.
+    pub fn AXObserverCreate(
+        application: c_int,
+        callback: AXObserverCallback,
+        out: *mut AXObserverRef,
+    ) -> c_int;
+
+    /// Start observing `notification` on `element`; `refcon` is passed to
+    /// the callback verbatim (AXUIElement.h `AXObserverAddNotification`).
+    /// AXError code (0 = success). Safety: `observer` owned by the caller;
+    /// `element` live; `notification` a valid CFString naming the
+    /// notification (e.g. [`K_AX_WINDOW_CREATED_NOTIFICATION`] via
+    /// [`cf_string_from_static`]); `refcon` must outlive the registration.
+    pub fn AXObserverAddNotification(
+        observer: AXObserverRef,
+        element: AXUIElementRef,
+        notification: CFStringRef,
+        refcon: *mut c_void,
+    ) -> c_int;
+
+    /// Stop observing one notification added with `AXObserverAddNotification`
+    /// (AXUIElement.h). AXError code (0 = success). Safety: the same refs,
+    /// in the same state, as the matching add call.
+    pub fn AXObserverRemoveNotification(
+        observer: AXObserverRef,
+        element: AXUIElementRef,
+        notification: CFStringRef,
+    ) -> c_int;
+
+    /// The run-loop source that delivers this observer's callbacks; add it
+    /// with [`CFRunLoopAddSource`] (AXUIElement.h — the SDK's modern
+    /// replacement for the removed `AXObserverAddToRunLoop`, verified
+    /// absent from HIServices.tbd). Borrowed — do not release.
+    /// Safety: `observer` must be a live owned AXObserverRef.
+    pub fn AXObserverGetRunLoopSource(observer: AXObserverRef) -> CFRunLoopSourceRef;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -86,6 +131,29 @@ extern "C" {
 
     /// Retain a CF object (bumps refcount). Safety: `cf` live CFTypeRef.
     pub fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
+
+    /// The main thread's run loop — the one `NSApplication` drives and the
+    /// same thread the Carbon hotkey handler and menu actions run on.
+    /// Borrowed ref, do not release. Safety: no arguments.
+    pub fn CFRunLoopGetMain() -> CFRunLoopRef;
+
+    /// Add a run-loop source in `mode` (CFRunLoop.h). Safety: `run_loop`
+    /// live (e.g. `CFRunLoopGetMain()`); `source` borrowed from its owner;
+    /// `mode` a valid CFString (e.g. [`K_CF_RUN_LOOP_DEFAULT_MODE`] via
+    /// [`cf_string_from_static`]).
+    pub fn CFRunLoopAddSource(
+        run_loop: CFRunLoopRef,
+        source: CFRunLoopSourceRef,
+        mode: CFStringRef,
+    );
+
+    /// Remove a run-loop source (pair of `CFRunLoopAddSource`). Safety: as
+    /// above; after removal the source must deliver no further callbacks.
+    pub fn CFRunLoopRemoveSource(
+        run_loop: CFRunLoopRef,
+        source: CFRunLoopSourceRef,
+        mode: CFStringRef,
+    );
 
     /// Create a CFString from a C string. Safety: `cstr` must be a valid
     /// NUL-terminated string; returns an owned ref or null.
@@ -277,6 +345,35 @@ pub fn cf_string_from_static(text: &[u8]) -> CFStringRef {
         )
     }
 }
+
+// MARK: - Accessibility observer (auto-tiling, ADR-0008)
+
+/// AXObserver callback (`AXUIElement.h` `AXObserverCallback`): delivered on
+/// the run loop the observer's source was added to, once per notification,
+/// with the affected element, the notification name and the registration's
+/// `refcon`.
+pub type AXObserverCallback = extern "C" fn(
+    observer: AXObserverRef,
+    element: AXUIElementRef,
+    notification: CFStringRef,
+    refcon: *mut c_void,
+);
+
+/// Notification name `AXWindowCreated` (`AXNotificationConstants.h` — the
+/// SDK defines these as `CFSTR` macros, not exported symbols; build the
+/// CFString with [`cf_string_from_static`]). Observed on the **app**
+/// element (ADR-0008: a window opened).
+pub const K_AX_WINDOW_CREATED_NOTIFICATION: &[u8] = b"AXWindowCreated\0";
+
+/// Notification name `AXUIElementDestroyed` (`AXNotificationConstants.h`).
+/// Observed on **window** elements (ADR-0008: a window closed).
+pub const K_AX_UI_ELEMENT_DESTROYED_NOTIFICATION: &[u8] = b"AXUIElementDestroyed\0";
+
+/// Run-loop mode `kCFRunLoopDefaultMode` (`CFRunLoop.h` — the constant's
+/// value is literally this string, so [`cf_string_from_static`] produces an
+/// equal mode CFString). This is the mode `NSApplication`'s main run loop
+/// runs in. Build with [`cf_string_from_static`].
+pub const K_CF_RUN_LOOP_DEFAULT_MODE: &[u8] = b"kCFRunLoopDefaultMode\0";
 
 // MARK: - Carbon Event Manager (global hotkey, ADR-0007)
 

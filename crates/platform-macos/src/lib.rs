@@ -9,6 +9,7 @@
 //! (Carbon hotkey handler); no other module contains unsafe blocks.
 
 pub mod adapter;
+pub mod auto_tiling;
 pub mod batch;
 pub mod config;
 pub mod ffi;
