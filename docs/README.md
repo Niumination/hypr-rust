@@ -36,8 +36,10 @@ The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md)
 15. [ADR-0004: batch multi-window deferred under strict no-partial requirement](./adr/0004-batch-multiwindow-deferred-no-partial.md) (superseded)
 16. [ADR-0005: batch multi-window accepted with best-effort rollback](./adr/0005-batch-multiwindow-best-effort-rollback.md)
 17. [ADR-0006: real-window reflow (all normal windows) with strict no-partial application](./adr/0006-real-window-reflow-strict-no-partial.md)
-18. [Capability matrix (per platform / OS build)](./CAPABILITY-MATRIX.md)
-19. [Using ax-shell — operations, configuration and local packaging](./USING-AX-SHELL.md)
+18. [ADR-0007: global hotkey for reflow via the Carbon Event Manager](./adr/0007-global-hotkey-reflow.md) (amended 2026-10-28: chord ⌃⌥⌘R → ⌥⌘R)
+19. [ADR-0008: event-driven auto-tiling via AXObserver — opt-in, one action](./adr/0008-auto-tiling-event-driven.md)
+20. [Capability matrix (per platform / OS build)](./CAPABILITY-MATRIX.md)
+21. [Using ax-shell — operations, configuration and local packaging](./USING-AX-SHELL.md)
 
 ## Non-goals and important caveats
 
@@ -66,7 +68,7 @@ The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md)
 
 **Does not exist — no production desktop app:**
 
-- Automatic multi-window tiling beyond the fixture-bound shell proof, the Windows adapter, native workspace integration (ADR-0003 gate) and beta/release packaging (a proven signing/notarization path) are outstanding (the reflow hotkey ⌥⌘R exists since [ADR-0007](./adr/0007-global-hotkey-reflow.md), host press evidence 2026-10-28 — ARENA Path P); a local unsigned development bundle is script-assembled (`scripts/package-macos.sh`). Apple Mac and macOS Ventura 13+ are **not** validated by this evidence; no cross-platform parity is claimed.
+- Automatic multi-window tiling beyond the fixture-bound shell proof, the Windows adapter, native workspace integration (ADR-0003 gate) and beta/release packaging (a proven signing/notarization path) are outstanding (the reflow hotkey ⌥⌘R exists since [ADR-0007](./adr/0007-global-hotkey-reflow.md), host press evidence 2026-10-28 — ARENA Path P); event-driven auto-tiling is design-accepted in [ADR-0008](./adr/0008-auto-tiling-event-driven.md) with implementation outstanding; a local unsigned development bundle is script-assembled (`scripts/package-macos.sh`). Apple Mac and macOS Ventura 13+ are **not** validated by this evidence; no cross-platform parity is claimed.
 
 The macOS spike reports ordinary AX control on a self-owned test window and disables Spaces. The host label conflict (system `MacBookPro16,2` vs owner ThinkPad X13 Yoga) is reconciled in the M1 report §1. PR #1 (Swift spike) and PR #2 (min-size constraints) are merged; the Phase 1 domain/planner/batch work landed via PR #5. See [user device profile](./USER-DEVICE-PROFILE.md), [macOS next stage](./MACOS-TAHOE-NEXT-STAGE.md), and [handoff plan](./AGENT-HANDOFF.md).
 
