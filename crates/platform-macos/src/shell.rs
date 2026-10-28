@@ -79,6 +79,7 @@ objc_msg!(msg_bool(a: bool));
 objc_msg!(msg_int(a: isize));
 objc_msg!(msg_cgfloat(a: CGFloat));
 objc_msg!(msg_i32(a: i32));
+objc_msg!(msg_id_id_id_id(a: Id, b: Id, c: Id, d: Id));
 objc_msg!(msg_view_init(rect: ffi::CGRect));
 objc_msg!(msg_popup_init(rect: ffi::CGRect, pulls_down: bool));
 objc_msg!(msg_window_init(
@@ -105,6 +106,7 @@ macro_rules! objc_msg_ret {
 
 objc_msg_ret!(msg_isize() -> isize);
 objc_msg_ret!(msg_u8() -> u8);
+objc_msg_ret!(msg_u8_id(a: Id) -> u8);
 objc_msg_ret!(msg_cstr() -> *const c_char);
 objc_msg_ret!(msg_set_frame(frame: ffi::CGRect) -> ());
 
@@ -278,6 +280,12 @@ fn current_config() -> Config {
     STATE.lock().unwrap().config.clone().unwrap_or_default()
 }
 
+/// The current rules (ADR-0008: the auto-tiling trigger filter re-reads
+/// them per event, because the panel Save can change them at runtime).
+pub(crate) fn current_rules() -> Vec<WindowRule> {
+    current_config().rules
+}
+
 /// Load the config, falling back to defaults. A missing file is normal
 /// (defaults); anything else is reported to the log without being fatal.
 fn load_config_or_default() -> Config {
@@ -382,8 +390,25 @@ fn save_settings_from_panel() {
     match Config::from_json(&body) {
         Ok(config) => match config.save() {
             Ok(()) => {
+                let was_enabled = STATE
+                    .lock()
+                    .unwrap()
+                    .config
+                    .as_ref()
+                    .map(|loaded| loaded.auto_tiling)
+                    .unwrap_or(false);
+                let now_enabled = config.auto_tiling;
                 STATE.lock().unwrap().config = Some(config);
                 set_settings_status(panel, "settings saved");
+                // ADR-0008 §1: the toggle applies live — re-sync the
+                // observers with the new rules; enabling also runs one
+                // immediate strict reflow so the effect is visible without
+                // hunting for a window event. Automated-evidence paths are
+                // a no-op inside set_enabled (§5).
+                crate::auto_tiling::set_enabled(now_enabled);
+                if now_enabled && !was_enabled {
+                    perform_reflow_real();
+                }
             }
             Err(error) => {
                 set_settings_status(panel, &format!("settings save failed: {error}"));
@@ -517,10 +542,58 @@ extern "C" fn action_quit(_this: Id, _cmd: Sel) {
     if let Some(error) = crate::hotkey::unregister() {
         append_log(&format!("hotkey: quit teardown: {error}"));
     }
+    // ADR-0008 §4: explicit observer teardown on quit — remove every
+    // notification, run-loop source and owned ref before the app goes away.
+    crate::auto_tiling::set_enabled(false);
     let app = STATE.lock().unwrap().app;
     if !app.is_null() {
         // SAFETY: `app` is the live NSApplication instance.
         unsafe { msg_void_id(app.0, sel("terminate:"), std::ptr::null()) };
+    }
+}
+
+/// NSWorkspace app launch/terminate notifications (registered in `run()`,
+/// ADR-0008 §2): attach or drop the per-app observer. Delivered on the
+/// main thread; a no-op while auto-tiling is off.
+extern "C" fn action_workspace_app_event(_this: Id, _cmd: Sel, notification: Id) {
+    // SAFETY: `notification` is a live NSNotification on the main thread;
+    // the names and the userInfo key are the exported AppKit constants.
+    unsafe {
+        let name = msg0(notification, sel("name"));
+        let is_launch = msg_u8_id(
+            name,
+            sel("isEqualToString:"),
+            ffi::NSWorkspaceDidLaunchApplicationNotification as Id,
+        ) != 0;
+        let is_terminate = msg_u8_id(
+            name,
+            sel("isEqualToString:"),
+            ffi::NSWorkspaceDidTerminateApplicationNotification as Id,
+        ) != 0;
+        if !is_launch && !is_terminate {
+            return;
+        }
+        let info = msg0(notification, sel("userInfo"));
+        if info.is_null() {
+            return;
+        }
+        let app = msg_id(
+            info,
+            sel("objectForKey:"),
+            ffi::NSWorkspaceApplicationKey as Id,
+        );
+        if app.is_null() {
+            return;
+        }
+        let pid = msg_isize(app, sel("processIdentifier"));
+        if pid <= 0 {
+            return;
+        }
+        if is_launch {
+            crate::auto_tiling::on_app_launched(pid as u32);
+        } else {
+            crate::auto_tiling::on_app_terminated(pid as u32);
+        }
     }
 }
 
@@ -842,7 +915,7 @@ fn running_bundle_ids() -> Vec<String> {
 /// == 0`), sorted for deterministic enumeration. Background and agent apps
 /// own no normal windows and are skipped. Only process identifiers and
 /// activation policies are read — never window titles.
-fn regular_app_pids() -> Vec<u32> {
+pub(crate) fn regular_app_pids() -> Vec<u32> {
     unsafe {
         let workspace = msg0(class("NSWorkspace"), sel("sharedWorkspace"));
         let apps = msg0(workspace, sel("runningApplications"));
@@ -867,6 +940,34 @@ fn regular_app_pids() -> Vec<u32> {
         pids.sort_unstable();
         pids.dedup();
         pids
+    }
+}
+
+/// The bundle identifier of the running app with `pid`, if it has one
+/// (unsigned CLI apps legitimately report none). Read-only: process id and
+/// bundle identifier only — never window titles (ADR-0008: the auto-tiling
+/// trigger filter needs the bundle to apply `exclude` rules).
+pub(crate) fn bundle_id_for_pid(pid: u32) -> Option<String> {
+    unsafe {
+        let workspace = msg0(class("NSWorkspace"), sel("sharedWorkspace"));
+        let apps = msg0(workspace, sel("runningApplications"));
+        if apps.is_null() {
+            return None;
+        }
+        let count = msg_isize(apps, sel("count"));
+        for index in 0..count.max(0) {
+            let app = msg_id_len(apps, sel("objectAtIndex:"), index as usize);
+            if app.is_null() || msg_isize(app, sel("processIdentifier")) as u32 != pid {
+                continue;
+            }
+            let bundle = msg0(app, sel("bundleIdentifier"));
+            return if bundle.is_null() {
+                None
+            } else {
+                Some(utf8_string(bundle))
+            };
+        }
+        None
     }
 }
 
@@ -1600,12 +1701,26 @@ fn perform_reflow() {
     set_status(&status);
 }
 
+/// The automatic action of event-driven auto-tiling (ADR-0008 §3): the
+/// **same** strict command the menu click and the ⌥⌘R hotkey run, called
+/// from the coalescing timer on the main run loop. While paused the event
+/// is dropped silently — no re-tile, no status churn (the chip already
+/// says the shell is paused).
+pub(crate) fn perform_reflow_automatic() {
+    if STATE.lock().unwrap().paused {
+        return;
+    }
+    perform_reflow_real();
+}
+
 /// Run one explicit reflow over **real app windows** (ADR-0006 scope (a)):
 /// every normal window of every regular app on the main display, applied
 /// with the strict no-partial batch.
 ///
 /// The layout, gaps, dialog policy and rules come from the loaded config;
-/// only an explicit user command reaches the batch. Automated evidence
+/// only an explicit user command or an owner-enabled automatic event
+/// ([ADR-0008](../../docs/adr/0008-auto-tiling-event-driven.md) — same
+/// function, no second path) reaches the batch. Automated evidence
 /// (`--self-test`, `--panel-click-proof`) never calls this function — those
 /// stay bound to the registered fixture via [`perform_reflow`].
 ///
@@ -1925,6 +2040,15 @@ unsafe fn create_target() -> Id {
             imp3(action_remove_rule),
             sender_types.as_ptr() as *const c_char,
         );
+        // ADR-0008 §2: NSWorkspace app launch/terminate notifications carry
+        // the posting NSNotification as the single object argument
+        // (`v@:@`).
+        ffi::class_addMethod(
+            cls,
+            sel("workspaceAppEvent:"),
+            imp3(action_workspace_app_event),
+            sender_types.as_ptr() as *const c_char,
+        );
         ffi::objc_registerClassPair(cls);
     }
     // SAFETY: `cls` is a registered class.
@@ -1979,6 +2103,39 @@ pub fn run() {
             state.app = Handle(app);
             state.status_item = Handle(item);
             state.target = Handle(target);
+        }
+        // ADR-0008 §2: observe app launch/terminate for the auto-tiling
+        // observers (the handler is a no-op while the toggle is off). The
+        // notification names are the exported AppKit constants.
+        let workspace = msg0(class("NSWorkspace"), sel("sharedWorkspace"));
+        let center = msg0(workspace, sel("notificationCenter"));
+        msg_id_id_id_id(
+            center,
+            sel("addObserver:selector:name:object:"),
+            target,
+            sel("workspaceAppEvent:"),
+            ffi::NSWorkspaceDidLaunchApplicationNotification as Id,
+            std::ptr::null(),
+        );
+        msg_id_id_id_id(
+            center,
+            sel("addObserver:selector:name:object:"),
+            target,
+            sel("workspaceAppEvent:"),
+            ffi::NSWorkspaceDidTerminateApplicationNotification as Id,
+            std::ptr::null(),
+        );
+        // ADR-0008 §1: honor the toggle from the previous session (attach
+        // is best-effort; failures are logged once per app, §4).
+        let auto_tiling_on = STATE
+            .lock()
+            .unwrap()
+            .config
+            .as_ref()
+            .map(|config| config.auto_tiling)
+            .unwrap_or(false);
+        if auto_tiling_on {
+            crate::auto_tiling::set_enabled(true);
         }
         msg_void(app, sel("run"));
     }
@@ -2068,6 +2225,9 @@ fn classify_pre_run() -> PreRun {
 }
 
 pub fn self_test() -> i32 {
+    // ADR-0008 §5: automated evidence never attaches auto-tiling observers,
+    // whatever the config says — set_enabled is a hard no-op in this mode.
+    crate::auto_tiling::set_automated(true);
     unsafe {
         // The pre-run file is classified before anything in this run may
         // write: valid, missing, or invalid/unsafe (fail closed, untouched).
@@ -2395,6 +2555,9 @@ pub fn self_test() -> i32 {
 /// Exit codes (same semantics as the self-test): 0 pass, 1 proof failure,
 /// 2 skipped.
 pub fn panel_click_proof() -> i32 {
+    // ADR-0008 §5: automated evidence never attaches auto-tiling observers,
+    // whatever the config says — set_enabled is a hard no-op in this mode.
+    crate::auto_tiling::set_automated(true);
     let path = match crate::config::config_path() {
         Ok(path) => path,
         Err(error) => {
