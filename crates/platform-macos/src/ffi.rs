@@ -18,6 +18,7 @@ pub type AXObserverRef = *const c_void;
 /// Opaque CoreFoundation run-loop refs (borrowed where noted per function).
 pub type CFRunLoopRef = *const c_void;
 pub type CFRunLoopSourceRef = *const c_void;
+pub type CFRunLoopTimerRef = *const c_void;
 
 /// Darwin `Boolean` (0 = false, non-zero = true).
 pub type Boolean = u8;
@@ -155,6 +156,40 @@ extern "C" {
         mode: CFStringRef,
     );
 
+    /// Absolute time in seconds since the reference epoch (2001-01-01)
+    /// (CFAbsoluteTimeGetCurrent). Safety: no arguments.
+    pub fn CFAbsoluteTimeGetCurrent() -> f64;
+
+    /// Create a run-loop timer (CFRunLoop.h). `fire_date`/`interval` are
+    /// CFAbsoluteTime seconds (`interval` 0 = one-shot); returns an owned
+    /// ref (CFRelease, or ownership passes to the run loop once added).
+    /// Safety: `callout` must be a valid `extern "C"` fn outliving the
+    /// timer; `context` a valid context pointer or null.
+    pub fn CFRunLoopTimerCreate(
+        allocator: CFTypeRef,
+        fire_date: f64,
+        interval: f64,
+        flags: usize,
+        order: isize,
+        callout: CFRunLoopTimerCallBack,
+        context: *mut CFRunLoopTimerContext,
+    ) -> CFRunLoopTimerRef;
+
+    /// Add a timer to a run loop in `mode` (CFRunLoop.h). Safety:
+    /// `run_loop` live; `timer` an owned timer ref; `mode` a valid CFString.
+    pub fn CFRunLoopAddTimer(run_loop: CFRunLoopRef, timer: CFRunLoopTimerRef, mode: CFStringRef);
+
+    /// Invalidate a timer: it fires no further and is removed from every
+    /// run loop (CFRunLoop.h). Safety: `timer` a live timer ref.
+    pub fn CFRunLoopTimerInvalidate(timer: CFRunLoopTimerRef);
+
+    /// Structural equality of two CF objects (CFBase.h). Safety: both refs
+    /// must be live CF objects of comparable types.
+    pub fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> Boolean;
+
+    /// Caller's process id (unistd.h, libSystem). Safety: no arguments.
+    pub fn getpid() -> c_int;
+
     /// Create a CFString from a C string. Safety: `cstr` must be a valid
     /// NUL-terminated string; returns an owned ref or null.
     pub fn CFStringCreateWithCString(
@@ -194,10 +229,6 @@ extern "C" {
     /// Element at index (borrowed). Safety: `array` live, `idx` in bounds.
     pub fn CFArrayGetValueAtIndex(array: CFTypeRef, idx: isize) -> CFTypeRef;
 
-    /// Compare two CF objects for equality. Safety: both must be live
-    /// (non-null) CFTypeRefs.
-    pub fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> Boolean;
-
     /// Type id of any live CF object. Safety: `cf` live, non-null CFTypeRef.
     pub fn CFGetTypeID(cf: CFTypeRef) -> usize;
 
@@ -233,7 +264,15 @@ extern "C" {
 }
 
 #[link(name = "AppKit", kind = "framework")]
-extern "C" {}
+extern "C" {
+    /// Exported AppKit constants (NSWorkspace.h): the launch/terminate
+    /// notification names and the userInfo key carrying the
+    /// `NSRunningApplication`. Static NSString pointers — read once per
+    /// event on the main thread.
+    pub static NSWorkspaceDidLaunchApplicationNotification: CFStringRef;
+    pub static NSWorkspaceDidTerminateApplicationNotification: CFStringRef;
+    pub static NSWorkspaceApplicationKey: CFStringRef;
+}
 
 #[link(name = "Foundation", kind = "framework")]
 extern "C" {}
@@ -358,6 +397,21 @@ pub type AXObserverCallback = extern "C" fn(
     notification: CFStringRef,
     refcon: *mut c_void,
 );
+
+/// Run-loop timer callback (`CFRunLoop.h` `CFRunLoopTimerCallBack`).
+pub type CFRunLoopTimerCallBack = extern "C" fn(timer: CFRunLoopTimerRef, info: *mut c_void);
+
+/// Run-loop timer context (`CFRunLoop.h`, 5 fields in this SDK — no
+/// `equal`, unlike the observer context). Pass a null context pointer when
+/// no user info is needed.
+#[repr(C)]
+pub struct CFRunLoopTimerContext {
+    pub version: isize,
+    pub info: *mut c_void,
+    pub retain: Option<unsafe extern "C" fn(*const c_void) -> *const c_void>,
+    pub release: Option<unsafe extern "C" fn(*const c_void)>,
+    pub copy_description: Option<unsafe extern "C" fn(*const c_void) -> CFStringRef>,
+}
 
 /// Notification name `AXWindowCreated` (`AXNotificationConstants.h` — the
 /// SDK defines these as `CFSTR` macros, not exported symbols; build the

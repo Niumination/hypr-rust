@@ -5,8 +5,9 @@
 //! safe API. See `docs/MACOS-TAHOE-NEXT-STAGE.md` for scope and acceptance.
 //!
 //! `unsafe` is confined to `ffi.rs` (raw declarations), `adapter.rs`
-//! (documented wrappers), `shell.rs` (Objective-C messaging) and `hotkey.rs`
-//! (Carbon hotkey handler); no other module contains unsafe blocks.
+//! (documented wrappers), `shell.rs` (Objective-C messaging), `hotkey.rs`
+//! (Carbon hotkey handler) and `auto_tiling.rs` (AXObserver wiring,
+//! ADR-0008); no other module contains unsafe blocks.
 
 pub mod adapter;
 pub mod auto_tiling;
