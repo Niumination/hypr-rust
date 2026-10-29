@@ -369,10 +369,6 @@ extern "C" fn on_ax_notification(
         return;
     }
     let pid = pid_c as u32;
-    let bundle = shell::bundle_id_for_pid(pid);
-    if !app_may_trigger(&shell::current_rules(), pid, bundle.as_deref()) {
-        return; // decision 4, re-checked: rules may have changed since attach
-    }
     // SAFETY: `notification` is the live name the observer delivered;
     // the constants are the leaked CFStrings we registered with.
     let created = unsafe {
@@ -381,6 +377,20 @@ extern "C" fn on_ax_notification(
             notification_created() as ffi::CFTypeRef,
         ) != 0
     };
+    // Trace point 1 of the automatic path (diagnostic): proves the AX
+    // callback itself was delivered. One line per observed window event.
+    shell::append_log(&format!(
+        "auto-tiling: event {} from pid {pid}",
+        if created {
+            "AXWindowCreated"
+        } else {
+            "AXUIElementDestroyed"
+        }
+    ));
+    let bundle = shell::bundle_id_for_pid(pid);
+    if !app_may_trigger(&shell::current_rules(), pid, bundle.as_deref()) {
+        return; // decision 4, re-checked: rules may have changed since attach
+    }
     {
         let mut observed = OBSERVED.lock().unwrap();
         let Some(map) = observed.as_mut() else { return };
@@ -470,6 +480,9 @@ extern "C" fn timer_fired(_timer: ffi::CFRunLoopTimerRef, _info: *mut c_void) {
         return;
     }
     if COALESCER.lock().unwrap().take_tick() {
+        // Trace point 2 of the automatic path (diagnostic): proves the
+        // coalescing timer fired with at least one pending event.
+        shell::append_log("auto-tiling: coalesced tick — automatic reflow");
         shell::perform_reflow_automatic();
     }
 }
