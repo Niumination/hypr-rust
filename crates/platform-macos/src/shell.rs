@@ -1708,8 +1708,12 @@ fn perform_reflow() {
 /// says the shell is paused).
 pub(crate) fn perform_reflow_automatic() {
     if STATE.lock().unwrap().paused {
+        // Trace point 3 of the automatic path (diagnostic): the tick
+        // arrived but the shell is paused, so the event is dropped.
+        append_log("auto-tiling: tick dropped (paused)");
         return;
     }
+    append_log("auto-tiling: automatic reflow");
     perform_reflow_real();
 }
 
