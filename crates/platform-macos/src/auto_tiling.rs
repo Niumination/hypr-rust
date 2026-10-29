@@ -456,27 +456,45 @@ fn schedule_tick() {
         }
         ffi::CFRunLoopAddTimer(ffi::CFRunLoopGetMain(), timer, mode_cfstring());
         *slot = Some(TickTimer(timer));
+        // Trace point 1b (diagnostic): the callback reached scheduling.
+        shell::append_log("auto-tiling: coalescing timer scheduled");
     }
 }
 
-/// Cancel a pending tick without acting (disable path).
-fn cancel_tick() {
+/// Release the fired one-shot timer's ref, leaving the coalescer intact.
+/// The fired timer is already invalid (one-shot); invalidate before the
+/// release so nothing can race it (all on the main thread anyway).
+fn release_fired_timer() {
     if let Some(TickTimer(timer)) = TICK_TIMER.lock().unwrap().take() {
-        // SAFETY: the timer ref is owned by the slot; invalidate first so
-        // no fire can race the release (all on the main thread anyway).
+        // SAFETY: the timer ref is owned by the slot and released exactly
+        // once here; a fired one-shot timer is safe to invalidate.
         unsafe {
             ffi::CFRunLoopTimerInvalidate(timer);
             ffi::CFRelease(timer as ffi::CFTypeRef);
         }
     }
+}
+
+/// Cancel a pending tick without acting (disable path): drops the timer
+/// **and** the pending event, so a later enable starts from a quiet state.
+fn cancel_tick() {
+    release_fired_timer();
     COALESCER.lock().unwrap().take_tick();
 }
 
 /// Timer fire (main run loop): one re-tile per burst, dropped silently
 /// while paused (ADR-0008 §3) and while disabled.
+///
+/// The fired timer's ref is released **without** touching the coalescer —
+/// the pending event is exactly what this fire exists to read (fix
+/// 2026-10-30: calling `cancel_tick` here cleared the pending flag before
+/// `take_tick` could read it, so every automatic reflow silently never
+/// ran; host trace showed events arriving with zero ticks).
 extern "C" fn timer_fired(_timer: ffi::CFRunLoopTimerRef, _info: *mut c_void) {
-    cancel_tick();
+    release_fired_timer();
     if !ENABLED.load(Ordering::SeqCst) {
+        // Disabled while the tick was pending: drop the stale event.
+        COALESCER.lock().unwrap().take_tick();
         return;
     }
     if COALESCER.lock().unwrap().take_tick() {
