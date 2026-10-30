@@ -108,19 +108,18 @@ pub enum AxError {
     /// Frame geometry is not writable: non-finite coordinate/size or
     /// non-positive size. Rejected before any write.
     InvalidGeometry,
-    /// The position write was rejected before anything was applied. A full
-    /// restore was still attempted and verified; `actual` is the best-known
-    /// frame after the restore (None if it could not be read).
-    PositionWriteFailed {
+    /// The size write was rejected before the move was attempted. Nothing was
+    /// applied — the window still sits at its original frame — so no rollback
+    /// is needed and the state is a true zero-partial refusal. `source` carries
+    /// the underlying AX failure (commonly an app's minimum-width floor).
+    SizeBeforePositionFailed {
         source: Box<AxError>,
-        rollback_restored: bool,
-        actual: Option<Rect>,
     },
-    /// The size write was rejected after the position write had already
-    /// been applied. The saved geometry was restored (or the restore failed —
-    /// `rollback_restored` says which); `actual` is the best-known frame after
-    /// the restore (None if it could not be read).
-    SizeAfterPositionFailed {
+    /// The size write was applied but the position write was rejected. The
+    /// saved geometry was restored (or the restore failed — `rollback_restored`
+    /// says which); `actual` is the best-known frame after the restore (None if
+    /// it could not be read).
+    PositionAfterSizeFailed {
         source: Box<AxError>,
         rollback_restored: bool,
         actual: Option<Rect>,
@@ -157,37 +156,25 @@ impl fmt::Display for AxError {
             Self::InvalidGeometry => {
                 write!(f, "invalid geometry (non-finite or non-positive size)")
             }
-            Self::PositionWriteFailed {
+            Self::SizeBeforePositionFailed { source } => write!(
+                f,
+                "size write rejected before move ({source}); window untouched"
+            ),
+            Self::PositionAfterSizeFailed {
                 source,
                 rollback_restored: true,
                 ..
             } => write!(
                 f,
-                "position write rejected ({source}); original geometry restored"
+                "position write rejected after size applied ({source}); original geometry restored"
             ),
-            Self::PositionWriteFailed {
+            Self::PositionAfterSizeFailed {
                 source,
                 rollback_restored: false,
                 ..
             } => write!(
                 f,
-                "position write rejected ({source}); ROLLBACK FAILED - window state unverified"
-            ),
-            Self::SizeAfterPositionFailed {
-                source,
-                rollback_restored: true,
-                ..
-            } => write!(
-                f,
-                "size write rejected after position applied ({source}); original geometry restored"
-            ),
-            Self::SizeAfterPositionFailed {
-                source,
-                rollback_restored: false,
-                ..
-            } => write!(
-                f,
-                "size write rejected after position applied ({source}); ROLLBACK FAILED - window left at new position with old size"
+                "position write rejected after size applied ({source}); ROLLBACK FAILED - window left at new size with old position"
             ),
             Self::VerificationReadFailed {
                 source,
@@ -344,19 +331,21 @@ fn set_window_frame_txn<O: FrameOps>(
     // Save first: if anything below fails, this is the rollback target.
     let before = ops.read_frame(el)?;
 
-    if let Err(source) = ops.write_position(el, rect.x, rect.y) {
-        // Position write rejected before anything was applied; still attempt a
-        // full restore + verify so the reported state is never a guess.
-        let (restored, actual) = restore_full_frame(ops, el, before);
-        return Err(AxError::PositionWriteFailed {
+    // Resize before moving. Several real apps accept a position write but
+    // then refuse the size write (observed minimum-width floors: Finder 511,
+    // Firefox 500 — AX exposes no min-size attribute). With this order a
+    // rejected size leaves the window completely untouched, so a refusal is
+    // a true zero-partial state and no rollback is needed.
+    if let Err(source) = ops.write_size(el, rect.width, rect.height) {
+        return Err(AxError::SizeBeforePositionFailed {
             source: Box::new(source),
-            rollback_restored: restored,
-            actual,
         });
     }
-    if let Err(source) = ops.write_size(el, rect.width, rect.height) {
+    if let Err(source) = ops.write_position(el, rect.x, rect.y) {
+        // Size was applied but the move was rejected; restore the full frame
+        // (size + position) so the reported state is never a guess.
         let (restored, actual) = restore_full_frame(ops, el, before);
-        return Err(AxError::SizeAfterPositionFailed {
+        return Err(AxError::PositionAfterSizeFailed {
             source: Box::new(source),
             rollback_restored: restored,
             actual,
@@ -1440,7 +1429,7 @@ mod tests {
         assert!(AxError::InvalidGeometry
             .to_string()
             .contains("invalid geometry"));
-        let rolled_back = AxError::SizeAfterPositionFailed {
+        let rolled_back = AxError::PositionAfterSizeFailed {
             source: Box::new(AxError::Unsupported),
             rollback_restored: true,
             actual: None,
@@ -1448,12 +1437,16 @@ mod tests {
         assert!(rolled_back
             .to_string()
             .contains("original geometry restored"));
-        let not_restored = AxError::SizeAfterPositionFailed {
+        let not_restored = AxError::PositionAfterSizeFailed {
             source: Box::new(AxError::Unsupported),
             rollback_restored: false,
             actual: None,
         };
         assert!(not_restored.to_string().contains("ROLLBACK FAILED"));
+        let untouched = AxError::SizeBeforePositionFailed {
+            source: Box::new(AxError::Unsupported),
+        };
+        assert!(untouched.to_string().contains("window untouched"));
     }
 
     #[test]
@@ -1724,18 +1717,40 @@ mod tests {
         let ops = MockOps::new(Rect::new(100.0, 668.0, 420.0, 312.0));
         let verified = set_window_frame_txn(&ops, EL, target).unwrap();
         assert_eq!(verified, target);
-        assert_eq!(ops.write_log(), vec!["position", "size"]);
+        // Resize before move: the size write lands first.
+        assert_eq!(ops.write_log(), vec!["size", "position"]);
     }
 
     #[test]
-    fn position_write_failure_attempts_full_rollback() {
+    fn size_write_failure_leaves_window_untouched() {
+        // The size write runs first, so a rejection means the position write
+        // never happens: the window is a true zero-partial refusal.
+        let before = Rect::new(100.0, 668.0, 420.0, 312.0);
+        let mut ops = MockOps::new(before);
+        ops.fail_size = true;
+        let err =
+            set_window_frame_txn(&ops, EL, Rect::new(120.0, 120.0, 420.0, 312.0)).unwrap_err();
+        assert_eq!(
+            err,
+            AxError::SizeBeforePositionFailed {
+                source: Box::new(AxError::Failure(-25200)),
+            }
+        );
+        // No write succeeded (the log records only accepted writes), and the
+        // position write was never attempted: the window sits untouched.
+        assert!(ops.write_log().is_empty());
+        assert_eq!(ops.frame.get(), before);
+    }
+
+    #[test]
+    fn position_write_failure_after_size_attempts_full_rollback() {
         let before = Rect::new(100.0, 668.0, 420.0, 312.0);
         let mut ops = MockOps::new(before);
         ops.fail_position = true;
         let err =
             set_window_frame_txn(&ops, EL, Rect::new(120.0, 120.0, 420.0, 312.0)).unwrap_err();
         match err {
-            AxError::PositionWriteFailed {
+            AxError::PositionAfterSizeFailed {
                 source,
                 rollback_restored,
                 actual,
@@ -1744,33 +1759,10 @@ mod tests {
                 assert!(rollback_restored);
                 assert_eq!(actual, Some(before));
             }
-            other => panic!("expected PositionWriteFailed, got {other:?}"),
+            other => panic!("expected PositionAfterSizeFailed, got {other:?}"),
         }
-        // The failed position write is not logged; rollback restores position + size.
-        assert_eq!(ops.write_log(), vec!["position", "size"]);
-    }
-
-    #[test]
-    fn size_write_failure_attempts_full_rollback() {
-        let before = Rect::new(100.0, 668.0, 420.0, 312.0);
-        let mut ops = MockOps::new(before);
-        ops.fail_size = true;
-        let err =
-            set_window_frame_txn(&ops, EL, Rect::new(120.0, 120.0, 420.0, 312.0)).unwrap_err();
-        match err {
-            AxError::SizeAfterPositionFailed {
-                source,
-                rollback_restored,
-                actual,
-            } => {
-                assert_eq!(*source, AxError::Failure(-25200));
-                assert!(rollback_restored);
-                assert_eq!(actual, Some(before));
-            }
-            other => panic!("expected SizeAfterPositionFailed, got {other:?}"),
-        }
-        // position applied, size failed, rollback restores position + size.
-        assert_eq!(ops.write_log(), vec!["position", "position", "size"]);
+        // size applied, position rejected, rollback restores position + size.
+        assert_eq!(ops.write_log(), vec!["size", "position", "size"]);
     }
 
     #[test]
@@ -1792,10 +1784,10 @@ mod tests {
             }
             other => panic!("expected VerificationReadFailed, got {other:?}"),
         }
-        // writes: position, size (applied) + rollback position, size.
+        // writes: size, position (applied) + rollback position, size.
         assert_eq!(
             ops.write_log(),
-            vec!["position", "size", "position", "size"]
+            vec!["size", "position", "position", "size"]
         );
     }
 
@@ -1819,10 +1811,10 @@ mod tests {
             }
             other => panic!("expected VerificationFailed, got {other:?}"),
         }
-        // writes: position, size (applied) + rollback position, size.
+        // writes: size, position (applied) + rollback position, size.
         assert_eq!(
             ops.write_log(),
-            vec!["position", "size", "position", "size"]
+            vec!["size", "position", "position", "size"]
         );
     }
 
