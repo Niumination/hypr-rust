@@ -112,9 +112,7 @@ pub enum AxError {
     /// applied — the window still sits at its original frame — so no rollback
     /// is needed and the state is a true zero-partial refusal. `source` carries
     /// the underlying AX failure (commonly an app's minimum-width floor).
-    SizeBeforePositionFailed {
-        source: Box<AxError>,
-    },
+    SizeBeforePositionFailed { source: Box<AxError> },
     /// The size write was applied but the position write was rejected. The
     /// saved geometry was restored (or the restore failed — `rollback_restored`
     /// says which); `actual` is the best-known frame after the restore (None if
