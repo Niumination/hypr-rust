@@ -1674,15 +1674,7 @@ fn perform_reflow() {
         }
     };
     let targets = match batch::targets_for_plan(&plan, &observation.map) {
-        Ok(mut targets) => {
-            // macOS enforces a minimum window height (AX exposes no min-size
-            // attribute, so the floor is host-measured): a plan that emits a
-            // shorter row would be clamped by the system, fail the strict
-            // read-back (ADR-0006), and roll back — making the layout look
-            // inert. Snap short rows up to the floor before the write.
-            batch::snap_short_rows(&mut targets);
-            targets
-        }
+        Ok(targets) => targets,
         Err(error) => {
             set_status(&format!("{label}: map {error:?}"));
             return;
@@ -1846,7 +1838,10 @@ fn perform_reflow_real() {
             // read-back (ADR-0006), and roll the whole batch back — making the
             // layout look inert. Snap short rows up to the floor before the
             // write; `snap_short_rows` leaves the plan untouched when snapping
-            // would collide adjacent frames.
+            // would collide adjacent frames. (Columns are not snapped: with
+            // more windows than the display can fit at the per-app minimum
+            // width, the plan is geometrically infeasible and must refuse
+            // honestly rather than be padded.)
             batch::snap_short_rows(&mut targets);
             targets
         }

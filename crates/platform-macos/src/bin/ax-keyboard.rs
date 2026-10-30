@@ -221,20 +221,16 @@ fn format_ax_error(err: &AxError, best_frame: Option<Rect>) -> String {
             "invalid geometry (non-finite or non-positive size); rollback_restored=n/a; frame={}",
             frame_str()
         ),
-        AxError::PositionWriteFailed {
-            source,
-            rollback_restored,
-            actual,
-        } => format!(
-            "position write rejected ({source}); rollback_restored={rollback_restored}; actual={}",
-            actual.as_ref().map(fmt_frame).unwrap_or_else(|| "<unreadable>".into())
+        AxError::SizeBeforePositionFailed { source } => format!(
+            "size write rejected before move ({source}); rollback_restored=true; actual={}",
+            frame_str()
         ),
-        AxError::SizeAfterPositionFailed {
+        AxError::PositionAfterSizeFailed {
             source,
             rollback_restored,
             actual,
         } => format!(
-            "size write rejected after position applied ({source}); rollback_restored={rollback_restored}; actual={}",
+            "position write rejected after size applied ({source}); rollback_restored={rollback_restored}; actual={}",
             actual.as_ref().map(fmt_frame).unwrap_or_else(|| "<unreadable>".into())
         ),
         AxError::VerificationReadFailed {
@@ -296,16 +292,14 @@ mod tests {
         let best = Some(Rect::new(100.0, 668.0, 420.0, 312.0));
 
         // Transaction variants carry their own `actual` frame + rollback status.
-        let err = AxError::PositionWriteFailed {
+        let err = AxError::SizeBeforePositionFailed {
             source: Box::new(AxError::Failure(-25200)),
-            rollback_restored: true,
-            actual: Some(before),
         };
         let s = format_ax_error(&err, None);
+        assert!(s.contains("size write rejected before move"), "msg: {s}");
         assert!(s.contains("rollback_restored=true"), "status: {s}");
-        assert!(s.contains("x: 100"), "frame: {s}");
 
-        let err = AxError::SizeAfterPositionFailed {
+        let err = AxError::PositionAfterSizeFailed {
             source: Box::new(AxError::Failure(-25200)),
             rollback_restored: false,
             actual: Some(before),
