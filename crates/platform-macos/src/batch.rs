@@ -38,6 +38,60 @@ pub struct BatchTarget {
     pub rect: Rect,
 }
 
+/// Minimum window height macOS enforces on resize. AX exposes no min-size
+/// attribute (verified: `kAXMinSizeAttribute` is absent from the SDK), so this
+/// value is taken from host observation on 2026-10-30: a `rows` layout that
+/// planned `Rect { y: 304.5, height: 246.5 }` read back as `{ y: 305,
+/// height: 252.0 }`. macOS clamped it, the strict read-back verification
+/// (ADR-0006) saw a mismatch > 1pt and rolled the whole batch back — making
+/// the layout look inert. Snapping short rows up to this floor before the
+/// write removes that mismatch.
+const MIN_WINDOW_HEIGHT: f64 = 252.0;
+
+/// Snap frames whose height falls below the macOS minimum up to it, growing
+/// each one downward so the write matches the strict read-back verification
+/// (ADR-0006) instead of being clamped by macOS and rolled back.
+///
+/// If two consecutive snapped frames in the same column would overlap (more
+/// rows than the minimum floor allows on this display), the snap is rolled
+/// back and the original plan is left untouched: the strict path then refuses
+/// honestly rather than writing visually overlapping frames.
+///
+/// Pure: unit-testable without AX. Only `height` changes; `x`/`y`/`width` are
+/// preserved.
+pub(crate) fn snap_short_rows(targets: &mut [BatchTarget]) {
+    // Snapshot the original rects so a collision can roll the whole snap back.
+    let original: Vec<Rect> = targets.iter().map(|target| target.rect).collect();
+
+    // Snap every below-minimum row to the floor, growing each one downward.
+    // Remember which indices were lifted so the collision check below only
+    // compares rects this function actually changed.
+    let mut snapped: Vec<usize> = Vec::new();
+    for (index, target) in targets.iter_mut().enumerate() {
+        if target.rect.height < MIN_WINDOW_HEIGHT {
+            target.rect.height = MIN_WINDOW_HEIGHT;
+            snapped.push(index);
+        }
+    }
+
+    // Collision check: two consecutive snapped rects in the same column (same
+    // x and width — i.e. a vertical stack, which is what `rows` emits) must
+    // not overlap. If the floor does not fit this many windows on this
+    // display, leave the plan untouched and let the strict path refuse
+    // honestly instead of writing overlapping frames.
+    const EPSILON: f64 = 1e-6;
+    for pair in snapped.windows(2) {
+        let (prev, next) = (&targets[pair[0]], &targets[pair[1]]);
+        let same_column = prev.rect.x == next.rect.x && prev.rect.width == next.rect.width;
+        if same_column && next.rect.y < prev.rect.y + prev.rect.height - EPSILON {
+            for (target, rect) in targets.iter_mut().zip(original.iter()) {
+                target.rect = *rect;
+            }
+            return;
+        }
+    }
+}
+
 /// Injectable per-window seam. The real adapter implements it with AX
 /// ([`crate::adapter::MacWindowSet`]); unit tests implement it with scripted
 /// outcomes (no Apple frameworks).
@@ -627,6 +681,59 @@ mod tests {
         );
         // 1 successful set + 2 restores (failed window included).
         assert_eq!(ops.writes.borrow().len(), 3);
+    }
+
+    #[test]
+    fn snap_short_rows_lifts_a_host_refusal_case() {
+        // The host-measured refusal (2026-10-30): three `rows` rows planned
+        // at 246.5pt height were clamped by macOS to 252.0 and read back
+        // mismatched, so ADR-0006 rolled the batch back. Snapping lifts each
+        // row to the 252 floor, keeps x/width untouched, and the rows stay
+        // gap-free so nothing overlaps.
+        let mut targets = [
+            target(1, 20.0, 20.0, 1560.0, 246.5),
+            target(2, 20.0, 274.5, 1560.0, 246.5),
+            target(3, 20.0, 529.0, 1560.0, 246.5),
+        ];
+        snap_short_rows(&mut targets);
+        let rects: Vec<Rect> = targets.iter().map(|target| target.rect).collect();
+        for rect in &rects {
+            assert_eq!(rect.height, 252.0);
+        }
+        assert_eq!(rects[0], Rect::new(20.0, 20.0, 1560.0, 252.0));
+        assert_eq!(rects[1].y, 274.5);
+        assert_eq!(rects[2].y, 529.0);
+        // No overlap: each row starts at or after the previous row's end.
+        for pair in rects.windows(2) {
+            assert!(pair[1].y >= pair[0].y + pair[0].height);
+        }
+    }
+
+    #[test]
+    fn snap_short_rows_leaves_tall_layouts_untouched() {
+        // `bsp` / `monocle` / `master-stack` emit tall rects; none may move.
+        let mut targets = [
+            target(1, 0.0, 0.0, 800.0, 900.0),
+            target(2, 800.0, 0.0, 800.0, 450.0),
+        ];
+        let before = targets;
+        snap_short_rows(&mut targets);
+        assert_eq!(targets, before);
+    }
+
+    #[test]
+    fn snap_short_rows_declines_when_snapping_would_collide() {
+        // Too many rows for the floor on a short display: snapping would push
+        // a row into its neighbour, so the plan is left untouched (the strict
+        // path refuses honestly instead of overlapping).
+        let mut targets = [
+            target(1, 0.0, 0.0, 800.0, 100.0),
+            target(2, 0.0, 100.0, 800.0, 100.0),
+            target(3, 0.0, 200.0, 800.0, 100.0),
+        ];
+        let before = targets;
+        snap_short_rows(&mut targets);
+        assert_eq!(targets, before);
     }
 
     #[test]
