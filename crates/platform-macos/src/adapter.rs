@@ -267,6 +267,14 @@ pub(crate) fn frames_match(expected: Rect, actual: Rect, tolerance: f64) -> bool
         && (actual.height - expected.height).abs() <= tolerance
 }
 
+/// Position-only comparison with tolerance. Used to recognise the host-clamp
+/// signature: the move landed but the size write was clamped (a size written
+/// while the window still sat at its old position may push the frame past a
+/// screen edge, and the host clamps it there).
+pub(crate) fn positions_match(expected: Rect, actual: Rect, tolerance: f64) -> bool {
+    (actual.x - expected.x).abs() <= tolerance && (actual.y - expected.y).abs() <= tolerance
+}
+
 /// Liveness check for `pid` (kill with sig 0 + errno: only ESRCH means
 /// dead; EPERM means alive-but-not-ours). Exported for the probe binary,
 /// which must not mutate a pid that was never registered as a fixture.
@@ -355,10 +363,39 @@ fn set_window_frame_txn<O: FrameOps>(
             if frames_match(rect, actual, K_FRAME_TOLERANCE) {
                 return Ok(actual);
             }
+            // Host-clamp recovery: the size write happens while the window
+            // still sits at its OLD position, and several apps clamp a size
+            // that would push the frame past a screen edge there (observed:
+            // Finder height 1010 -> 521 at y=559 on a 1080-tall display,
+            // Firefox width 1248 -> 644 at x=1276). The position write then
+            // succeeds, so the only wrong piece is the clamped size — and at
+            // the NEW position the requested size fits. When the position
+            // landed, retry the size write once and re-verify.
+            let mut observed = actual;
+            if positions_match(rect, actual, K_FRAME_TOLERANCE)
+                && ops.write_size(el, rect.width, rect.height).is_ok()
+            {
+                match ops.read_frame(el) {
+                    Ok(retried) => {
+                        if frames_match(rect, retried, K_FRAME_TOLERANCE) {
+                            return Ok(retried);
+                        }
+                        observed = retried;
+                    }
+                    Err(source) => {
+                        let (restored, best) = restore_full_frame(ops, el, before);
+                        return Err(AxError::VerificationReadFailed {
+                            source: Box::new(source),
+                            rollback_restored: restored,
+                            actual: best,
+                        });
+                    }
+                }
+            }
             let (restored, _) = restore_full_frame(ops, el, before);
             Err(AxError::VerificationFailed {
                 expected: rect,
-                actual,
+                actual: observed,
                 rollback_restored: restored,
             })
         }
@@ -539,8 +576,11 @@ impl MacAxAdapter {
     /// 3. Position is written, then size. If either write is rejected, the
     ///    saved geometry is fully restored (position + size) and verified.
     /// 4. After both writes are accepted, the frame is read back and compared
-    ///    within tolerance. On read-back error or mismatch the saved geometry
-    ///    is fully restored and verified.
+    ///    within tolerance. If the position landed but the size was clamped
+    ///    by the host (size written at the old position pushed the frame past
+    ///    a screen edge), the size write is retried once at the new position
+    ///    before giving up. On read-back error or persistent mismatch the
+    ///    saved geometry is fully restored and verified.
     /// 5. Every post-mutation failure returns a typed error preserving the
     ///    original cause, the rollback status, and the best-known observed
     ///    frame — a partial state is never hidden.
@@ -1606,6 +1646,9 @@ mod tests {
     struct MockOps {
         frame: Cell<Rect>,
         read_override: Option<Rect>,
+        /// Override for the SECOND read-back (used by the host-clamp retry
+        /// scenarios: the retried size is still clamped).
+        read_override_2: Option<Rect>,
         fail_read_back: bool,
         fail_rollback_read: bool,
         fail_position: bool,
@@ -1622,6 +1665,7 @@ mod tests {
             Self {
                 frame: Cell::new(frame),
                 read_override: None,
+                read_override_2: None,
                 fail_read_back: false,
                 fail_rollback_read: false,
                 fail_position: false,
@@ -1649,6 +1693,12 @@ mod tests {
                     return Err(AxError::Failure(-25204));
                 }
                 if let Some(r) = self.read_override {
+                    return Ok(r);
+                }
+            }
+            if n == 2 {
+                // Retry read-back (host-clamp recovery), when scripted.
+                if let Some(r) = self.read_override_2 {
                     return Ok(r);
                 }
             }
@@ -1875,6 +1925,70 @@ mod tests {
         ops.read_override = Some(Rect::new(121.5, 120.0, 420.0, 312.0));
         let err = set_window_frame_txn(&ops, EL, target).unwrap_err();
         assert!(matches!(err, AxError::VerificationFailed { .. }));
+    }
+
+    #[test]
+    fn host_clamped_size_is_retried_once_at_the_new_position() {
+        // Real failure (1920x1080 display): the size write ran while the
+        // window still sat at y=559, so the host clamped height 1010 -> 521
+        // (1080-559); the move to y=50 then succeeded. At the new position
+        // the full size fits, so one retried size write must verify.
+        let before = Rect::new(20.0, 559.0, 1248.0, 501.0);
+        let target = Rect::new(20.0, 50.0, 621.0, 1010.0);
+        let mut ops = MockOps::new(before);
+        // First read-back: position landed, size came back clamped.
+        ops.read_override = Some(Rect::new(20.0, 50.0, 621.0, 521.0));
+        let verified = set_window_frame_txn(&ops, EL, target).unwrap();
+        assert_eq!(verified, target);
+        // size, position, then exactly one retried size write.
+        assert_eq!(ops.write_log(), vec!["size", "position", "size"]);
+    }
+
+    #[test]
+    fn host_clamped_width_is_retried_once_at_the_new_position() {
+        // Second real failure: size written while the window sat at x=1276,
+        // host clamped width 1248 -> 644 (1920-1276); the move to x=20 then
+        // succeeded. Same recovery, horizontal axis.
+        let before = Rect::new(1276.0, 50.0, 624.0, 1010.0);
+        let target = Rect::new(20.0, 50.0, 1248.0, 501.0);
+        let mut ops = MockOps::new(before);
+        ops.read_override = Some(Rect::new(20.0, 50.0, 644.0, 501.0));
+        let verified = set_window_frame_txn(&ops, EL, target).unwrap();
+        assert_eq!(verified, target);
+        assert_eq!(ops.write_log(), vec!["size", "position", "size"]);
+    }
+
+    #[test]
+    fn persistent_clamp_after_retry_rolls_back_and_reports_mismatch() {
+        // An app minimum-width floor (Firefox 500) survives the retry: the
+        // retried size write is accepted but reads back clamped again. The
+        // transaction must fall back to the full verified rollback and
+        // report the LAST observed frame, never a silent partial state.
+        let before = Rect::new(0.0, 30.0, 1920.0, 1050.0);
+        let target = Rect::new(20.0, 50.0, 464.0, 1010.0);
+        let mut ops = MockOps::new(before);
+        // First read-back: position landed, width clamped to the app floor.
+        ops.read_override = Some(Rect::new(20.0, 50.0, 500.0, 1010.0));
+        // Retry read-back: still clamped at the floor.
+        ops.read_override_2 = Some(Rect::new(20.0, 50.0, 500.0, 1010.0));
+        let err = set_window_frame_txn(&ops, EL, target).unwrap_err();
+        match err {
+            AxError::VerificationFailed {
+                expected,
+                actual,
+                rollback_restored,
+            } => {
+                assert_eq!(expected, target);
+                assert_eq!(actual, Rect::new(20.0, 50.0, 500.0, 1010.0));
+                assert!(rollback_restored);
+            }
+            other => panic!("expected VerificationFailed, got {other:?}"),
+        }
+        // size, position, retried size, then rollback position + size.
+        assert_eq!(
+            ops.write_log(),
+            vec!["size", "position", "size", "position", "size"]
+        );
     }
 
     // MARK: - Multi-window observation (pure builder; no Apple frameworks)
