@@ -31,7 +31,7 @@ impl Default for LayoutConfig {
         Self {
             outer_gap: 12.0,
             inner_gap: 8.0,
-            master_ratio: 0.55,
+            master_ratio: 0.7,
         }
     }
 }
