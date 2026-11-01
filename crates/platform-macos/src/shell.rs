@@ -307,6 +307,44 @@ extern "C" fn action_reflow(_this: Id, _cmd: Sel) {
     perform_reflow_real();
 }
 
+/// Pick a layout from the Layout submenu: resolve the sender's
+/// `representedObject` (the canonical layout name), persist it through the
+/// same validated save path the settings panel uses, adopt it in memory so
+/// the menu/reflow never act on a stale config, then run one strict reflow so
+/// the change is visible immediately (owner decision 2026-11-01).
+///
+/// An unknown name is refused without touching the config — the submenu only
+/// ever carries names from `LAYOUT_KINDS`, so this is a defensive guard.
+extern "C" fn action_set_layout(_this: Id, _cmd: Sel, sender: Id) {
+    // SAFETY: `sender` is the live submenu NSMenuItem; its representedObject
+    // is the NSString set in `add_layout_submenu`.
+    let name = unsafe {
+        let object = msg0(sender, sel("representedObject"));
+        utf8_string(object)
+    };
+    let Some(kind) = layout_kind_name_lookup(&name) else {
+        set_status(&format!("unknown layout: {name}"));
+        return;
+    };
+    // Clone the effective config, flip only the kind, and save through the
+    // same `Config::from_json`-validated render the panel uses (0600, atomic).
+    let mut config = {
+        let state = STATE.lock().unwrap();
+        state.config.clone().unwrap_or_default()
+    };
+    config.kind = kind;
+    match config.save() {
+        Ok(()) => {
+            STATE.lock().unwrap().config = Some(config);
+            set_status(&format!("layout: {name}"));
+            // Owner decision 2026-11-01: applying the pick reflows at once,
+            // on the owner-driven real-window path (ADR-0006 §3).
+            perform_reflow_real();
+        }
+        Err(error) => set_status(&format!("layout change failed: {error}")),
+    }
+}
+
 extern "C" fn action_toggle_pause(_this: Id, _cmd: Sel) {
     {
         let mut state = STATE.lock().unwrap();
@@ -1401,6 +1439,39 @@ unsafe fn separator() -> Id {
     unsafe { msg0(class("NSMenuItem"), sel("separatorItem")) }
 }
 
+/// A "Layout: {kind}" item carrying a submenu of every layout kind, with the
+/// active one checkmarked. Each entry is bound to `setLayout:` and carries its
+/// canonical name in `representedObject`, so the action resolves the sender
+/// without a lookup table of its own.
+///
+/// SAFETY: `menu` is a live NSMenu and `target` a live object.
+unsafe fn add_layout_submenu(menu: Id, target: Id, config: &Config) {
+    // SAFETY: documented class/instance initialisers.
+    let parent = unsafe { msg0(class("NSMenuItem"), sel("new")) };
+    let submenu = unsafe { msg0(class("NSMenu"), sel("new")) };
+    unsafe {
+        msg_void_id(
+            parent,
+            sel("setTitle:"),
+            nsstring(&format!("Layout: {}", config.kind_name())),
+        );
+        msg_bool(submenu, sel("setAutoenablesItems:"), false);
+        for (name, kind) in crate::config::LAYOUT_KINDS {
+            let item = msg0(class("NSMenuItem"), sel("new"));
+            msg_void_id(item, sel("setTitle:"), nsstring(name));
+            msg_void_id(item, sel("setAction:"), sel("setLayout:") as Id);
+            msg_void_id(item, sel("setTarget:"), target);
+            msg_void_id(item, sel("setRepresentedObject:"), nsstring(name));
+            if kind == config.kind {
+                msg_int(item, sel("setState:"), K_STATE_ON);
+            }
+            msg_void_id(submenu, sel("addItem:"), item);
+        }
+        msg_void_id(parent, sel("setSubmenu:"), submenu);
+        msg_void_id(menu, sel("addItem:"), parent);
+    }
+}
+
 /// Build a fresh menu reflecting the current state.
 ///
 /// SAFETY: `target` is the live action-target object.
@@ -1421,6 +1492,7 @@ unsafe fn build_menu(target: Id) -> Id {
             &format!("Reflow: {}", config.kind_name()),
             "reflow:",
         );
+        add_layout_submenu(menu, target, &config);
         add_action(
             menu,
             target,
@@ -1982,8 +2054,8 @@ fn imp3(f: extern "C" fn(Id, Sel, Id)) -> *const std::os::raw::c_void {
 ///
 /// SAFETY: each `class_addMethod` pairs a registered selector with an
 /// implementation matching its encoding: `v@:` for the two-argument actions
-/// and `v@:@` for `removeRule:`, which takes the sending control as its
-/// third argument.
+/// and `v@:@` for `removeRule:`/`setLayout:`, which take the sending control
+/// as their third argument.
 unsafe fn create_target() -> Id {
     let superclass = class("NSObject");
     let name = b"HyprRustShell\0";
@@ -2000,6 +2072,14 @@ unsafe fn create_target() -> Id {
             sel("reflow:"),
             imp(action_reflow),
             types.as_ptr() as *const c_char,
+        );
+        // The Layout submenu item passes its canonical name via
+        // `representedObject`, so this action receives the sending item.
+        ffi::class_addMethod(
+            cls,
+            sel("setLayout:"),
+            imp3(action_set_layout),
+            sender_types.as_ptr() as *const c_char,
         );
         ffi::class_addMethod(
             cls,
@@ -2853,6 +2933,31 @@ mod settings_number_validation_tests {
             "1e",
         ] {
             assert!(!is_json_number(text), "{text:?} should be refused");
+        }
+    }
+}
+
+#[cfg(test)]
+mod layout_submenu_tests {
+    use super::layout_kind_name_lookup;
+    use crate::config::LAYOUT_KINDS;
+
+    #[test]
+    fn every_submenu_name_resolves_to_its_kind() {
+        // The submenu only ever carries names from LAYOUT_KINDS (the same
+        // table the file format and panel popup draw from), so each must
+        // resolve back to the kind it was rendered from.
+        for (name, kind) in LAYOUT_KINDS {
+            assert_eq!(layout_kind_name_lookup(name), Some(kind), "{name}");
+        }
+    }
+
+    #[test]
+    fn unknown_layout_name_is_refused_without_touching_config() {
+        // Defensive guard: a representedObject outside the table never maps
+        // to a kind, so the action returns before any save.
+        for text in ["", "Columns", "columns ", "grid", "layout"] {
+            assert_eq!(layout_kind_name_lookup(text), None, "{text:?}");
         }
     }
 }
