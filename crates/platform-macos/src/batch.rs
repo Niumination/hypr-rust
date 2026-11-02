@@ -344,6 +344,35 @@ pub fn apply_batch_strict<O: BatchOps>(ops: &O, targets: &[BatchTarget]) -> Stri
     }
 }
 
+/// The window the caller should drop from its next attempt, when this strict
+/// result is a clean refusal caused by the **host clamping** a verified frame
+/// (ADR-0006, clamp-skip amendment 2026-11-02).
+///
+/// Returns `Some(key)` only when every one of these holds:
+///
+/// - [`StrictStatus::CleanRefusal`] — no net change; every restore verified;
+/// - at least one write was attempted (`refused_before_write == false`);
+/// - the failure is [`AxError::VerificationFailed`] with a verified restore:
+///   the host accepted the writes but kept a different geometry (a per-window
+///   minimum size), so the same request would fail on every retry.
+///
+/// Preflight read failures, plain AX errors, permission loss and
+/// [`StrictStatus::LoudPartial`] never skip: those are transient or unsafe to
+/// plan around, and the caller must report them exactly as before. The skip is
+/// therefore only ever taken against a deterministic, fully restored refusal.
+pub fn unfit_skip(result: &StrictBatchResult) -> Option<WindowKey> {
+    if result.status() != StrictStatus::CleanRefusal || result.refused_before_write {
+        return None;
+    }
+    match &result.result.error {
+        Some(AxError::VerificationFailed {
+            rollback_restored: true,
+            ..
+        }) => result.result.failed_at,
+        _ => None,
+    }
+}
+
 /// Why a batch plan was rejected.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanError {
@@ -891,5 +920,86 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(verify_plan_file(&path), Err(PlanError::NotOwnerOnly));
         std::fs::remove_file(&path).unwrap();
+    }
+
+    // MARK: - Clamp-skip decision (ADR-0006 amendment 2026-11-02)
+
+    /// A clean clamp refusal: writes happened, the host kept its own geometry,
+    /// and the restore verified — the deterministic case worth skipping.
+    fn clamp_refusal(rollback_restored: bool, before_write: bool) -> StrictBatchResult {
+        StrictBatchResult {
+            result: BatchResult {
+                outcomes: Vec::new(),
+                failed_at: Some(WindowKey(7)),
+                error: Some(AxError::VerificationFailed {
+                    expected: Rect::new(20.0, 50.0, 464.0, 1010.0),
+                    actual: Rect::new(20.0, 50.0, 511.0, 1010.0),
+                    rollback_restored,
+                }),
+                rollback_all_restored: true,
+            },
+            refused_before_write: before_write,
+        }
+    }
+
+    #[test]
+    fn only_a_restored_clamp_refusal_is_skipped() {
+        assert_eq!(unfit_skip(&clamp_refusal(true, false)), Some(WindowKey(7)));
+    }
+
+    #[test]
+    fn success_never_skips() {
+        let ops = MockBatch::default();
+        let result = apply_batch_strict(&ops, &[]);
+        assert_eq!(unfit_skip(&result), None);
+    }
+
+    #[test]
+    fn preflight_refusal_never_skips_even_on_a_mismatch() {
+        // No write happened, so nothing proves the frame is deterministic:
+        // a read failure must keep refusing with zero writes as before.
+        assert_eq!(unfit_skip(&clamp_refusal(true, true)), None);
+    }
+
+    #[test]
+    fn loud_partial_never_skips() {
+        // The restore did not verify — the batch must stay loud, never be
+        // planned around.
+        let result = StrictBatchResult {
+            result: BatchResult {
+                outcomes: Vec::new(),
+                failed_at: Some(WindowKey(7)),
+                error: Some(AxError::VerificationFailed {
+                    expected: Rect::new(0.0, 0.0, 100.0, 100.0),
+                    actual: Rect::new(0.0, 0.0, 200.0, 200.0),
+                    rollback_restored: false,
+                }),
+                rollback_all_restored: false,
+            },
+            refused_before_write: false,
+        };
+        assert_eq!(unfit_skip(&result), None);
+    }
+
+    #[test]
+    fn plain_ax_failures_never_skip() {
+        // Transient host errors (cannotComplete, permission loss, stale
+        // target) are not a size floor: they keep the strict refusal.
+        for error in [
+            AxError::Failure(-25204),
+            AxError::PermissionDenied,
+            AxError::StaleTarget,
+        ] {
+            let result = StrictBatchResult {
+                result: BatchResult {
+                    outcomes: Vec::new(),
+                    failed_at: Some(WindowKey(7)),
+                    error: Some(error),
+                    rollback_all_restored: true,
+                },
+                refused_before_write: false,
+            };
+            assert_eq!(unfit_skip(&result), None);
+        }
     }
 }

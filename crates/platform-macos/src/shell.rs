@@ -23,6 +23,7 @@ use layout_core::{DisplayId, Rect};
 
 use crate::adapter::{
     global_window_key, split_global_window_key, AxError, MacAxAdapter, MacMultiWindowSet,
+    MacObservation,
 };
 use crate::batch;
 use crate::config::{dialog_policy_for, rules_json, Config, ConfigError, DialogPolicy, WindowRule};
@@ -1886,49 +1887,105 @@ fn perform_reflow_real() {
     }
 
     let observation = merged.observe(work);
-    let plan = match layout_core::plan_snapshot_with_rules(
-        &observation.snapshot,
-        DisplayId(0),
-        kind,
-        layout,
-        include_dialogs,
-        &window_rules,
-    ) {
-        Ok(plan) => plan,
-        Err(error) => {
-            let status = format!("{label}: plan {error:?} (0 windows touched)");
-            append_log(&status);
-            set_status(&status);
-            return;
+    // Clamp-skip (ADR-0006 amendment 2026-11-02): a clean refusal caused by
+    // the host clamping one window's frame is deterministic — the same
+    // request would fail on every retry — so that window is dropped and the
+    // rest are re-planned to fill its space. Every attempt stays strict
+    // (zero-partial per batch), a loud partial is never retried, and the loop
+    // is bounded: each skip removes exactly one window, and the duplicate-key
+    // guard breaks out if a key ever repeats.
+    let mut unfit: Vec<batch::WindowKey> = Vec::new();
+    let mut last: Option<(batch::StrictBatchResult, usize)> = None;
+    let (result, excluded) = loop {
+        let snapshot = snapshot_without_unfit(&observation, &unfit);
+        if snapshot.windows.is_empty() {
+            // Every observed window was skipped as unfit: report the last
+            // refusal honestly instead of planning an empty layout.
+            break last.expect("skipping every window implies a previous refusal");
+        }
+        let plan = match layout_core::plan_snapshot_with_rules(
+            &snapshot,
+            DisplayId(0),
+            kind,
+            layout,
+            include_dialogs,
+            &window_rules,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => {
+                let status = format!("{label}: plan {error:?} (0 windows touched)");
+                append_log(&status);
+                set_status(&status);
+                return;
+            }
+        };
+        let targets = match batch::targets_for_plan(&plan, &observation.map) {
+            Ok(mut targets) => {
+                // macOS enforces a minimum window height (AX exposes no min-size
+                // attribute, so the floor is host-measured): a plan that emits a
+                // shorter row would be clamped by the system, fail the strict
+                // read-back (ADR-0006), and roll the whole batch back — making the
+                // layout look inert. Snap short rows up to the floor before the
+                // write; `snap_short_rows` leaves the plan untouched when snapping
+                // would collide adjacent frames. (Columns are not snapped: with
+                // more windows than the display can fit at the per-app minimum
+                // width, the plan is geometrically infeasible and must refuse
+                // honestly rather than be padded.)
+                batch::snap_short_rows(&mut targets);
+                targets
+            }
+            Err(error) => {
+                let status = format!("{label}: map {error:?} (0 windows touched)");
+                append_log(&status);
+                set_status(&status);
+                return;
+            }
+        };
+        let result = batch::apply_batch_strict(&merged, &targets);
+        match batch::unfit_skip(&result) {
+            Some(key) if !unfit.contains(&key) => {
+                unfit.push(key);
+                last = Some((result, plan.excluded.len()));
+            }
+            _ => break (result, plan.excluded.len()),
         }
     };
-    let targets = match batch::targets_for_plan(&plan, &observation.map) {
-        Ok(mut targets) => {
-            // macOS enforces a minimum window height (AX exposes no min-size
-            // attribute, so the floor is host-measured): a plan that emits a
-            // shorter row would be clamped by the system, fail the strict
-            // read-back (ADR-0006), and roll the whole batch back — making the
-            // layout look inert. Snap short rows up to the floor before the
-            // write; `snap_short_rows` leaves the plan untouched when snapping
-            // would collide adjacent frames. (Columns are not snapped: with
-            // more windows than the display can fit at the per-app minimum
-            // width, the plan is geometrically infeasible and must refuse
-            // honestly rather than be padded.)
-            batch::snap_short_rows(&mut targets);
-            targets
-        }
-        Err(error) => {
-            let status = format!("{label}: map {error:?} (0 windows touched)");
-            append_log(&status);
-            set_status(&status);
-            return;
-        }
-    };
-    let result = batch::apply_batch_strict(&merged, &targets);
-    let mut status = strict_status_text(&label, &result, plan.excluded.len(), skipped);
+    let mut status = strict_status_text(&label, &result, excluded, skipped, unfit.len());
     push_unavailable(&mut status, &unavailable);
     append_log(&status);
     set_status(&status);
+}
+
+/// The observation's snapshot with every window already skipped as unfit
+/// removed, so the next plan redistributes that space to the remaining
+/// windows. A window with no native key is left in place (the mapping stays
+/// fail-closed in `targets_for_plan`), and the focused flag follows the drop —
+/// the planner only promotes a focused window it can still find.
+fn snapshot_without_unfit(
+    observation: &MacObservation,
+    unfit: &[batch::WindowKey],
+) -> layout_core::PlatformSnapshot {
+    let mut snapshot = observation.snapshot.clone();
+    if unfit.is_empty() {
+        return snapshot;
+    }
+    snapshot
+        .windows
+        .retain(|window| match observation.map.get(window.id) {
+            Some(key) => !unfit.contains(&key),
+            None => true,
+        });
+    if let Some(focused) = snapshot.focused_window {
+        let dropped = observation
+            .map
+            .get(focused)
+            .map(|key| unfit.contains(&key))
+            .unwrap_or(false);
+        if dropped {
+            snapshot.focused_window = None;
+        }
+    }
+    snapshot
 }
 
 /// Name the apps the enumeration skipped after the §2.1 amendment's retry
@@ -1967,11 +2024,17 @@ fn failed_at_note(result: &batch::StrictBatchResult) -> String {
 /// The ADR-0006 three-way status line: success / clean refusal / loud
 /// partial state. A partial state names the observed frames, is never
 /// phrased as success, and the word "atomic" is never used.
+///
+/// `unfit` counts windows the clamp-skip loop dropped because the host
+/// refused their geometry (ADR-0006 amendment 2026-11-02); they keep their
+/// original frames and are named separately from the preflight `skipped`
+/// (minimized/fullscreen/off-display) count.
 fn strict_status_text(
     label: &str,
     result: &batch::StrictBatchResult,
     excluded: usize,
     skipped: usize,
+    unfit: usize,
 ) -> String {
     let mut extras = String::new();
     if excluded > 0 {
@@ -1981,6 +2044,9 @@ fn strict_status_text(
         extras.push_str(&format!(
             ", {skipped} skipped (minimized/fullscreen/off-display)"
         ));
+    }
+    if unfit > 0 {
+        extras.push_str(&format!(", {unfit} skipped (won't fit)"));
     }
     let failed = failed_at_note(result);
     let error_of = |r: &batch::StrictBatchResult| {
@@ -2964,7 +3030,7 @@ mod layout_submenu_tests {
 
 #[cfg(test)]
 mod strict_status_text_tests {
-    use super::{push_unavailable, strict_status_text};
+    use super::{push_unavailable, snapshot_without_unfit, strict_status_text};
     use crate::adapter::{AxError, WindowKey};
     use crate::batch::{BatchResult, StrictBatchResult, StrictStatus, WindowOutcome};
     use layout_core::Rect;
@@ -3037,7 +3103,7 @@ mod strict_status_text_tests {
 
     #[test]
     fn success_names_the_applied_count_and_never_claims_atomicity() {
-        let text = strict_status_text("Reflow", &success(), 3, 1);
+        let text = strict_status_text("Reflow", &success(), 3, 1, 0);
         assert!(text.starts_with("Reflow: tiled 2 window(s)"));
         assert!(text.contains("3 excluded"));
         assert!(text.contains("1 skipped"));
@@ -3047,7 +3113,7 @@ mod strict_status_text_tests {
 
     #[test]
     fn preflight_refusal_says_zero_windows_touched() {
-        let text = strict_status_text("Reflow", &refusal(true), 0, 0);
+        let text = strict_status_text("Reflow", &refusal(true), 0, 0, 0);
         assert!(text.contains("refused before write"));
         assert!(text.contains("0 windows touched"));
         assert!(!text.to_lowercase().contains("atomic"));
@@ -3056,7 +3122,7 @@ mod strict_status_text_tests {
 
     #[test]
     fn mid_batch_refusal_says_all_windows_restored() {
-        let text = strict_status_text("Reflow", &refusal(false), 2, 0);
+        let text = strict_status_text("Reflow", &refusal(false), 2, 0, 0);
         assert!(text.contains("refused"));
         assert!(text.contains("all windows restored"));
         // A non-global key (no pid) names the raw key, never invents an app.
@@ -3071,19 +3137,19 @@ mod strict_status_text_tests {
         // the app pid so a clamping app can be excluded by rules.
         let mut failed = refusal(false);
         failed.result.failed_at = Some(crate::adapter::global_window_key(477, 1));
-        let text = strict_status_text("Reflow", &failed, 0, 0);
+        let text = strict_status_text("Reflow", &failed, 0, 0, 0);
         assert!(text.contains("failed at app pid 477 (window 1)"));
         // The preflight refusal names it too.
         let mut before = refusal(true);
         before.result.failed_at = Some(crate::adapter::global_window_key(63181, 0));
-        let text = strict_status_text("Reflow", &before, 0, 0);
+        let text = strict_status_text("Reflow", &before, 0, 0, 0);
         assert!(text.contains("failed at app pid 63181 (window 0)"));
         assert!(text.contains("0 windows touched"));
     }
 
     #[test]
     fn loud_partial_names_observed_frames_and_never_reads_as_success() {
-        let text = strict_status_text("Reflow", &loud_partial(), 0, 0);
+        let text = strict_status_text("Reflow", &loud_partial(), 0, 0, 0);
         assert!(text.contains("PARTIAL STATE"));
         assert!(text.contains("restore unverified"));
         // Every rolled-back key with its observed frame is named honestly.
@@ -3099,13 +3165,69 @@ mod strict_status_text_tests {
     #[test]
     fn unavailable_apps_are_named_by_pid_and_absent_stays_clean() {
         // §2.1 amendment: skipped apps appear by pid in any status line…
-        let mut text = strict_status_text("Reflow", &success(), 1, 0);
+        let mut text = strict_status_text("Reflow", &success(), 1, 0, 0);
         push_unavailable(&mut text, &[477, 63181]);
         assert!(text.contains(", unavailable skipped: pid 477, 63181"));
         assert!(text.starts_with("Reflow: tiled"));
         // …and with no skipped app the line is untouched.
-        let mut clean = strict_status_text("Reflow", &success(), 0, 0);
+        let mut clean = strict_status_text("Reflow", &success(), 0, 0, 0);
         push_unavailable(&mut clean, &[]);
         assert!(!clean.contains("unavailable"));
+    }
+
+    #[test]
+    fn clamp_skipped_windows_are_named_separately_from_preflight_skips() {
+        // Success after the clamp-skip loop: the dropped window kept its
+        // original frame and the count reads differently from a preflight
+        // skip (minimized/fullscreen/off-display).
+        let text = strict_status_text("Reflow", &success(), 2, 0, 1);
+        assert!(text.starts_with("Reflow: tiled 2 window(s)"));
+        assert!(text.contains("2 excluded"));
+        assert!(text.contains("1 skipped (won't fit)"));
+        assert!(!text.contains("minimized"));
+        assert!(!text.to_lowercase().contains("atomic"));
+    }
+
+    #[test]
+    fn a_final_refusal_still_reports_the_skipped_count() {
+        // Every window may end up unfit: the last refusal must still say how
+        // many windows were dropped on the way, and stay a refusal.
+        let text = strict_status_text("Reflow", &refusal(false), 0, 0, 3);
+        assert!(text.contains("refused"));
+        assert!(text.contains("all windows restored"));
+        assert!(text.contains("3 skipped (won't fit)"));
+        assert!(!text.to_lowercase().contains("atomic"));
+    }
+
+    #[test]
+    fn snapshot_without_unfit_drops_only_the_skipped_window() {
+        use crate::adapter::observation_from_windows;
+        use layout_core::WindowRole;
+
+        let observation = observation_from_windows(
+            Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            &[
+                (
+                    WindowKey(477),
+                    Rect::new(0.0, 0.0, 500.0, 500.0),
+                    WindowRole::Application,
+                ),
+                (
+                    WindowKey(648),
+                    Rect::new(500.0, 0.0, 500.0, 500.0),
+                    WindowRole::Application,
+                ),
+            ],
+            Some(WindowKey(648)),
+        );
+        // Dropping the focused window removes it and clears the focus flag;
+        // the other window stays with its frame untouched.
+        let dropped = snapshot_without_unfit(&observation, &[WindowKey(648)]);
+        assert_eq!(dropped.windows.len(), 1);
+        assert_eq!(dropped.windows[0].id, layout_core::WindowId(477));
+        assert_eq!(dropped.focused_window, None);
+        // No skip list is a pure clone: nothing is dropped by accident.
+        let untouched = snapshot_without_unfit(&observation, &[]);
+        assert_eq!(untouched, observation.snapshot);
     }
 }

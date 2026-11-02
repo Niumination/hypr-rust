@@ -1,6 +1,6 @@
 # ADR-0006: Real-Window Reflow Scope (All Normal Windows) With Strict No-Partial Application
 
-- **Status:** Accepted (owner decision; fulfils the ADR-0005 addendum's "productization needs a new decision"); **§2.1 amended 2026-10-27** (enumeration retry + skip-and-name, owner decision after the first real-window run)
+- **Status:** Accepted (owner decision; fulfils the ADR-0005 addendum's "productization needs a new decision"); **§2.1 amended 2026-10-27** (enumeration retry + skip-and-name, owner decision after the first real-window run); **§2.5 amended 2026-11-02** (clamp-skip: a window the host clamps is dropped and the rest re-planned, owner decision after the TCC-reset incident)
 - **Date:** 2026-10-27
 - **Decision owners:** Product + owner
 - **Relates to:** [ADR-0005](./0005-batch-multiwindow-best-effort-rollback.md) (fixture-bound status quo), [ADR-0004](./0004-batch-multiwindow-deferred-no-partial.md) (superseded), [ADR-0001](./0001-product-boundary.md)
@@ -86,6 +86,29 @@ residual race documented in Paths F–H; the promise is therefore *no partial is
 reported as success and every detectable failure refuses before writing* — not
 platform-level atomicity. Status/label text must never use the word "atomic".
 
+5. **Clamp-skip retry (amended 2026-11-02, owner decision after the TCC-reset
+   incident).** A clean refusal caused by the **host clamping one window's frame**
+   (a verified read-back mismatch whose restore verified — a per-window minimum
+   size, e.g. Finder's 511×288 floor or System Settings' fixed width) is
+   deterministic: the same request would fail on every retry, and strict no-partial
+   then rolled back *everything*, so one incompressible window made every layout
+   look broken. The amendment:
+   - only a clean refusal whose failure is a **verified read-back mismatch** with a
+     verified restore skips (`unfit_skip`); preflight read failures, plain AX
+     errors, permission loss and **loud partial states never skip** — a loud
+     partial is reported immediately and never retried;
+   - the skipped window **keeps its original frame** (it was restored) and is
+     dropped from the next attempt; the remaining windows are **re-planned** so
+     they fill the freed space;
+   - the loop is bounded by the window count, a repeated key breaks it, and when
+     every window has been skipped the last refusal is reported;
+   - the status names the count separately from the preflight skips:
+     `N skipped (won't fit)`.
+   Every attempt remains one full strict batch — zero-partial **per attempt** is
+   untouched. The amendment changes *which windows* an operation targets after a
+   deterministic clamp, never how a failure is reported, and never turns a partial
+   result into a success.
+
 ### 3. Boundary after this ADR
 
 - **Non-fixture surface:** the interactive menu reflow commands, owner-driven, one
@@ -119,7 +142,10 @@ window.
   the owner must act on (the residual race is proven, Paths F–H).
 - More refusals: a target window that cannot be read still blocks the whole reflow
   (before any write); an app-level enumeration failure now skips and names the app
-  instead (§2.1 amendment, 2026-10-27), so one busy app no longer vetoes the command.
+  instead (§2.1 amendment, 2026-10-27), so one busy app no longer vetoes the command;
+  a window the host clamps to its own minimum is now skipped and re-planned around
+  instead (§2.5 amendment, 2026-11-02), at the cost of one extra write-and-restore
+  cycle against that window per attempt.
 - Windows of every regular app move in one batch — mis-chosen state (e.g. a window the
   owner expected to stay) is restored only by an explicit follow-up command, not
   automatically.
