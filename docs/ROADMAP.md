@@ -2,13 +2,14 @@
 
 **Planning basis:** interview decisions captured 2026-10-17. Estimates remain relative; do not publish calendar commitments before spikes, staffing and scope are agreed.
 
-## Current status (2026-10-22)
+## Current status (2026-11-04)
 
-- **Pure layout planning may continue** (`layout-core::compute_layout` with `LayoutKind::MasterStack` and its tests; no OS side effects).
-- **Native batch multi-window application is implemented with best-effort rollback** — the owner changed the semantics (strict no-partial is no longer required); see [ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md), which supersedes [ADR-0004](./adr/0004-batch-multiwindow-deferred-no-partial.md). A failed batch restores every already-changed window and reports the actual state honestly; it never claims atomicity.
-- **Native macOS M2 (Jalur A) PASS is host-bound:** ThinkPad X13 Yoga Gen 1 (Intel i5-10310U), macOS Tahoe 26.7.1 build 25G241, self-owned fixture window. It does **not** validate Apple hardware or older macOS.
-- **Windows 11** waits for a Windows boot; no Windows runtime evidence yet.
-- **No cross-platform parity is claimed.** Permission-denied is runtime-tested in one AX-untrusted launchd user-domain context (2026-10-23).
+- **Pure layout planning is complete and tested** — `layout-core` ships all five layouts (BSP, master/stack, monocle, columns, rows) plus rules/exclusions and clamp-aware geometry; no OS side effects.
+- **Real-window reflow is implemented as strict no-partial and owner-validated on real windows** ([ADR-0006](./adr/0006-real-window-reflow-strict-no-partial.md)): preflight read-before-write, verified writes, full rollback, honest three-way status — host-validated on all three legs 2026-10-27, and the clamp-skip amendment §2.5 host-verified 2026-11-03 (ARENA Path O, four host runs). The **fixture-bound** self-test path keeps best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md), which supersedes [ADR-0004](./adr/0004-batch-multiwindow-deferred-no-partial.md)) and never claims atomicity.
+- **Global hotkey `⌥⌘R`** ([ADR-0007](./adr/0007-global-hotkey-reflow.md), Path P host-verified 2026-10-28) and **opt-in event-driven auto-tiling** ([ADR-0008](./adr/0008-auto-tiling-event-driven.md), Path Q host-verified 2026-10-30/31) are implemented; auto-tiling stays off until the user enables it explicitly.
+- **All native evidence is host-bound:** ThinkPad X13 Yoga Gen 1 (Intel i5-10310U), macOS Tahoe 26.7.1 build 25G241, single 1920×1080 display. It does **not** validate Apple hardware or older macOS; packaging is a local unsigned `.app` (signing/notarization open).
+- **Windows 11** waits for a Windows boot; the Windows adapter is not implemented and there is no Windows runtime evidence yet.
+- **No cross-platform parity is claimed.** macOS Spaces remain disabled (no public API proven for the required set). Permission-denied is runtime-tested in one AX-untrusted launchd user-domain context (2026-10-23).
 
 ## Phase 0 — feasibility and product boundary
 
@@ -21,7 +22,7 @@
 - Confirm settings UI, Windows tray and macOS menu-bar approach; verify installers and signing/notarization path.
 - Review dependency licenses and public product name.
 
-**Current sequencing (2026-10-22):** only the Tahoe host has been exercised so far — single-window M1/M2 via public AX (`#1`, `#3`, `#4`). The Windows machine has not been booted in this effort. The Ventura/Apple-Mac target and the parallel-probe items above remain **unverified future targets**, not tested claims. Native **batch multi-window** uses best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)); the planner was never the blocker.
+**Current sequencing (2026-11-04):** only the Tahoe host has been exercised — single-window M1/M2 via public AX (2026-10-22), then the full real-window path: strict reflow ([ADR-0006](./adr/0006-real-window-reflow-strict-no-partial.md), host-validated 2026-10-27 + clamp-skip 2026-11-03), global hotkey (Path P) and opt-in auto-tiling (Path Q). The Windows machine has not been booted in this effort. The Ventura/Apple-Mac target and the parallel-probe items above remain **unverified future targets**, not tested claims. The **fixture-bound** batch path uses best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)); the planner was never the blocker.
 
 **Stop/go:** If ordinary window control is unreliable on one OS, revise supported-window claims before implementation. Workspace feasibility failure alone does not stop the cross-platform tiling core.
 
@@ -46,7 +47,7 @@
 - Validate elevated targets and focus restrictions; no default elevation.
 
 ### Intel macOS Ventura 13+
-**Updated (2026-10-22):** native batch multi-window application is implemented with best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)); current Tahoe evidence is single-window M1/M2 plus native batch runs (two-window success and two-window rollback). The Ventura 13+ target remains unverified.
+**Updated (2026-11-04):** the macOS vertical slice on Tahoe is implemented and host-validated — menu-bar shell + settings/rules editor, strict real-window reflow ([ADR-0006](./adr/0006-real-window-reflow-strict-no-partial.md)) with clamp-skip, global hotkey `⌥⌘R` ([ADR-0007](./adr/0007-global-hotkey-reflow.md)) and opt-in event-driven auto-tiling ([ADR-0008](./adr/0008-auto-tiling-event-driven.md)); the fixture-bound batch keeps best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)). Packaging is a local unsigned `.app`; the Ventura 13+ target remains unverified.
 - Menu-bar lifecycle, settings UI, Accessibility explanation/request and revocation handling.
 - AX discovery/events, public display APIs and coordinate conversion.
 - Validate signed identity/trust, representative apps and permission failures.
@@ -93,14 +94,25 @@ One engineer may cover multiple roles; unsafe FFI and permission-sensitive work 
 
 ## Immediate next actions
 
-**Validated (2026-10-22):** macOS Tahoe single-window M1/M2 (AX adapter + `ax-keyboard` select/move/resize/raise) on the owner's ThinkPad X13 Yoga Gen 1, macOS Tahoe 26.7.1 build 25G241 — owner-reported, host-bound; does not cover Apple Mac or Ventura. Native batch multi-window is **implemented with best-effort rollback** ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)) and was native-run on the same host.
+**Validated (through 2026-11-04; all owner-reported and host-bound to the ThinkPad/Tahoe build above unless noted):**
+
+1. Pure layout Phase 1 — `layout-core` five layouts, rules/exclusions and clamp-aware geometry, workspace tests green (no OS side effects).
+2. macOS Tahoe single-window M1/M2 (AX adapter + `ax-keyboard` select/move/resize/raise), 2026-10-22.
+3. Fixture-bound native batch two-window success + rollback, plus one permission-denied runtime test (AX-untrusted launchd context, 2026-10-23) — [ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md).
+4. Real-window strict reflow across master-stack/monocle/bsp/columns/rows — three legs host-validated 2026-10-27, clamp-skip host-verified 2026-11-03 — [ADR-0006](./adr/0006-real-window-reflow-strict-no-partial.md).
+5. Global hotkey `⌥⌘R`, host-verified 2026-10-28 — [ADR-0007](./adr/0007-global-hotkey-reflow.md).
+6. Opt-in event-driven auto-tiling (open/close → one coalesced strict re-tile), host-verified 2026-10-30/31 — [ADR-0008](./adr/0008-auto-tiling-event-driven.md).
+7. End-to-end multi-window layout on macOS — **done** (strict no-partial, not best-effort); Windows pending a boot.
+8. CI on GitHub `macos-26` (fmt/clippy/tests + package) green through PR #47; local unsigned `.app` bundle path proven (signing/notarization still open).
 
 **Planned (not yet validated):**
 
-1. Windows 11 feasibility spike — waits for a Windows boot; no Windows runtime evidence yet.
-2. macOS Ventura 13+ / Apple-Mac validation — future target, still unverified.
-3. Pure layout Phase 1 (shared geometry/layout core; BSP/master-stack) — may proceed now, no OS side effects.
-4. Define the exact workspace operation checklist and capture a go/no-go result per OS.
-5. Select representative apps for developer and general-use validation.
-6. One end-to-end multi-window layout per OS — macOS done with best-effort rollback ([ADR-0005](./adr/0005-batch-multiwindow-best-effort-rollback.md)); Windows pending a boot.
-7. Update the supported-capability matrix from test evidence before adding workspace shortcuts to UI.
+1. **Operator/production hardening** — `.app` LaunchServices/TCC re-validation after each rebuild, signing/notarization or an accountable distribution strategy, Accessibility-permission guidance under the bundled identity, install/update, and clear first-run auto-tiling opt-in.
+2. **Hardware/display matrix** — repeat on a target Apple Mac; multi-display/mixed-DPI, display/work-area changes, fullscreen/minimized windows and varied apps; document unsupported cases without moving or hiding windows.
+3. **Min-size/fit policy for dense layouts** — clamp-skip stays honest (a skipped window is not tiled); decide whether min-size-aware planning is worth it.
+4. Windows 11 feasibility spike + adapter — waits for a Windows boot; no Windows runtime evidence yet.
+5. macOS Ventura 13+ / Apple-Mac validation — future target, still unverified.
+6. Define the exact workspace operation checklist and capture a go/no-go result per OS (Spaces stay disabled until every required operation is proven through public APIs).
+7. Select representative apps for developer and general-use validation.
+8. Update the supported-capability matrix from test evidence before adding workspace shortcuts to UI.
+9. Ecosystem design after the Mac core stabilizes — local versioned IPC, native status bar/widget API and an extension permission model; no Waybar/Hyprland binary-compatibility promise (design decision first, per the confirmed product direction).
