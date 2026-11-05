@@ -40,6 +40,7 @@ The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md)
 19. [ADR-0008: event-driven auto-tiling via AXObserver — opt-in, one action](./adr/0008-auto-tiling-event-driven.md)
 20. [Capability matrix (per platform / OS build)](./CAPABILITY-MATRIX.md)
 21. [Using ax-shell — operations, configuration and local packaging](./USING-AX-SHELL.md)
+22. [ADR-0009 draft: extension protocol and Waybar-like integration](./adr/0009-extension-ecosystem-draft.md)
 
 ## Non-goals and important caveats
 
@@ -69,6 +70,7 @@ The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md)
 **Does not exist — no production desktop app:**
 
 - Automatic multi-window tiling beyond the fixture-bound shell proof, the Windows adapter, native workspace integration (ADR-0003 gate) and beta/release packaging (a proven signing/notarization path) are outstanding (the reflow hotkey ⌥⌘R exists since [ADR-0007](./adr/0007-global-hotkey-reflow.md), host press evidence 2026-10-28 — ARENA Path P); event-driven auto-tiling is design-accepted in [ADR-0008](./adr/0008-auto-tiling-event-driven.md) with implementation outstanding; a local unsigned development bundle is script-assembled (`scripts/package-macos.sh`). Apple Mac and macOS Ventura 13+ are **not** validated by this evidence; no cross-platform parity is claimed.
+- Local proposal branch `proposal/extension-ecosystem` adds a source-level, read-only IPC `status.get` prototype (ADR-0009 draft). It has no event subscription, action API, status-bar adapter, or native compile/runtime evidence yet; do not treat it as an upstream feature.
 
 The macOS spike reports ordinary AX control on a self-owned test window and disables Spaces. The host label conflict (system `MacBookPro16,2` vs owner ThinkPad X13 Yoga) is reconciled in the M1 report §1. PR #1 (Swift spike) and PR #2 (min-size constraints) are merged; the Phase 1 domain/planner/batch work landed via PR #5. See [user device profile](./USER-DEVICE-PROFILE.md), [macOS next stage](./MACOS-TAHOE-NEXT-STAGE.md), and [handoff plan](./AGENT-HANDOFF.md).
 
