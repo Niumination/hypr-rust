@@ -16,6 +16,7 @@ pub mod config;
 pub mod ffi;
 pub mod fixture;
 pub mod hotkey;
+mod ipc;
 pub mod shell;
 
 pub use adapter::{

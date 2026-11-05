@@ -276,6 +276,19 @@ fn policy_from_title(title: Option<&str>) -> DialogPolicy {
     }
 }
 
+/// Read-only IPC snapshot. It deliberately excludes status text, process IDs,
+/// window metadata, AX objects, and every action handle.
+pub(crate) fn ipc_status_snapshot() -> crate::ipc::StatusSnapshot {
+    let state = STATE.lock().unwrap();
+    let config = state.config.clone().unwrap_or_default();
+    crate::ipc::StatusSnapshot {
+        layout: config.kind_name(),
+        paused: state.paused,
+        auto_tiling: config.auto_tiling,
+        include_dialogs: config.include_dialogs,
+    }
+}
+
 /// The loaded config, or the defaults before one is loaded.
 fn current_config() -> Config {
     STATE.lock().unwrap().config.clone().unwrap_or_default()
@@ -576,6 +589,8 @@ extern "C" fn action_diagnostics(_this: Id, _cmd: Sel) {
 }
 
 extern "C" fn action_quit(_this: Id, _cmd: Sel) {
+    // Stop accepting status queries before the shell's state is torn down.
+    crate::ipc::shutdown();
     // ADR-0007: release the hotkey refs before the app goes away (the OS
     // would free them at exit anyway; explicit teardown keeps it honest).
     if let Some(error) = crate::hotkey::unregister() {
@@ -2299,6 +2314,12 @@ pub fn run() {
             .unwrap_or(false);
         if auto_tiling_on {
             crate::auto_tiling::set_enabled(true);
+        }
+        // ADR-0009 draft: read-only local status IPC. Binding failure is
+        // fail-soft; the native menu and all existing controls still work.
+        match crate::ipc::start() {
+            Ok(()) => append_log("ipc: read-only v1 status.get listening at ~/.hypr-rust/ipc.sock"),
+            Err(error) => append_log(&format!("ipc: unavailable — {error}; menu remains usable")),
         }
         msg_void(app, sel("run"));
     }

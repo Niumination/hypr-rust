@@ -115,4 +115,4 @@ One engineer may cover multiple roles; unsafe FFI and permission-sensitive work 
 6. Define the exact workspace operation checklist and capture a go/no-go result per OS (Spaces stay disabled until every required operation is proven through public APIs).
 7. Select representative apps for developer and general-use validation.
 8. Update the supported-capability matrix from test evidence before adding workspace shortcuts to UI.
-9. Ecosystem design after the Mac core stabilizes — local versioned IPC, native status bar/widget API and an extension permission model; no Waybar/Hyprland binary-compatibility promise (design decision first, per the confirmed product direction).
+9. Extension ecosystem (after the Mac core stabilizes) — owner-selected versioned local Unix-socket IPC, native status bar/widget API and a separate opt-in capability model; no Waybar/Hyprland binary-compatibility promise. ADR-0009 remains Proposed. A read-only `status.get` prototype exists only on local proposal branch `proposal/extension-ecosystem`; not yet built, native-tested, or merged.
