@@ -70,7 +70,7 @@ A bar or extension must be able to observe Hypr-Rust state and, eventually, requ
 ## Staged rollout (proposal)
 
 1. **Protocol ADR + schema review:** settle event names, privacy, permissions, config relationship, and dependency choice.
-2. **Read-only IPC prototype (source slice exists locally):** `status.get` snapshot over the bounded owner-only Unix socket; pure parser tests are written but not yet run. Native validation still required for version mismatch, malformed/oversize input, same-/other-UID peer checks, stale socket, quit cleanup, and proof that the path cannot mutate windows. Event streaming is explicitly deferred.
+2. **Read-only IPC prototype (shipped via PR #49, amended 2026-11-07):** `status.get` snapshot over the bounded owner-only Unix socket; the pure parser/response tests run in CI and on the host (platform-macos 103 lib + 2 bin, workspace 29). Native validation executed on the Tahoe host on 2026-11-07 (ARENA Path R): version mismatch, malformed/oversize input, same-UID peer behavior, stale socket, client disconnect, quit cleanup, a live query from `scripts/ipc-status.py`, and proof that the path cannot mutate windows (mutation method rejected) all pass. **Still not runtime-tested:** the other-UID peer gate (single-user host) and the second-instance bind-conflict path. Event streaming is explicitly deferred.
 3. **Native bar consumer:** render the same read-only status through AppKit and verify lifecycle/permission behavior on the Tahoe host.
 4. **External extension SDK:** only after protocol stability; publish sample read-only extension and lifecycle tooling.
 5. **Optional action requests/config adapter:** separate owner decision and acceptance tests; never weaken ADR-0006 or claim original plugin ABI compatibility.
