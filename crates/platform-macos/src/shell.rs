@@ -231,6 +231,10 @@ struct ShellState {
     config: Option<Config>,
     settings: Option<SettingsPanel>,
     status: String,
+    /// No config file existed when the interactive shell started: show the
+    /// one-line first-run guidance until a save writes the file (owner
+    /// decision 2026-11-07). Never set by the automated evidence paths.
+    first_run: bool,
 }
 
 static STATE: Mutex<ShellState> = Mutex::new(ShellState {
@@ -241,6 +245,7 @@ static STATE: Mutex<ShellState> = Mutex::new(ShellState {
     config: None,
     settings: None,
     status: String::new(),
+    first_run: false,
 });
 
 /// One interactive rules row in the settings panel: the row's host view, its
@@ -302,15 +307,30 @@ pub(crate) fn current_rules() -> Vec<WindowRule> {
 
 /// Load the config, falling back to defaults. A missing file is normal
 /// (defaults); anything else is reported to the log without being fatal.
-fn load_config_or_default() -> Config {
-    match Config::load() {
-        Ok(config) => config,
-        Err(error) => {
-            if !matches!(error, ConfigError::Missing) {
-                append_log(&format!("config: {error}"));
-            }
-            Config::default()
+///
+/// The second field is `true` only for [`ConfigError::Missing`] — "this is a
+/// first run" — which the interactive shell turns into a short guidance line
+/// in the menu (owner decision 2026-11-07). Automated paths ignore it.
+fn load_config_or_default() -> (Config, bool) {
+    let result = Config::load();
+    if let Err(error) = &result {
+        if !matches!(error, ConfigError::Missing) {
+            append_log(&format!("config: {error}"));
         }
+    }
+    config_for_load(result)
+}
+
+/// The `(config, first_run)` decision for one [`Config::load`] outcome,
+/// without the log side effect: only a missing file is a first run; an
+/// invalid/unsafe file falls back to defaults but must never read as one
+/// (it exists — the owner's profile). Split out so the distinction is
+/// unit-testable without touching the host's config file.
+fn config_for_load(result: Result<Config, ConfigError>) -> (Config, bool) {
+    match result {
+        Ok(config) => (config, false),
+        Err(ConfigError::Missing) => (Config::default(), true),
+        Err(_) => (Config::default(), false),
     }
 }
 
@@ -349,7 +369,12 @@ extern "C" fn action_set_layout(_this: Id, _cmd: Sel, sender: Id) {
     config.kind = kind;
     match config.save() {
         Ok(()) => {
-            STATE.lock().unwrap().config = Some(config);
+            {
+                let mut state = STATE.lock().unwrap();
+                state.config = Some(config);
+                // The config file now exists: the first-run line is gone.
+                state.first_run = false;
+            }
             set_status(&format!("layout: {name}"));
             // Owner decision 2026-11-01: applying the pick reflows at once,
             // on the owner-driven real-window path (ADR-0006 §3).
@@ -373,7 +398,12 @@ extern "C" fn action_reset_defaults(_this: Id, _cmd: Sel) {
         Ok(()) => {
             // Adopt the defaults immediately so the menu, the next reflow and
             // the diagnostics never act on a config the file no longer contains.
-            STATE.lock().unwrap().config = Some(defaults);
+            {
+                let mut state = STATE.lock().unwrap();
+                state.config = Some(defaults);
+                // The config file now exists: the first-run line is gone.
+                state.first_run = false;
+            }
             set_status("settings reset to defaults");
         }
         Err(error) => set_status(&format!("reset failed: {error}")),
@@ -450,7 +480,12 @@ fn save_settings_from_panel() {
                     .map(|loaded| loaded.auto_tiling)
                     .unwrap_or(false);
                 let now_enabled = config.auto_tiling;
-                STATE.lock().unwrap().config = Some(config);
+                {
+                    let mut state = STATE.lock().unwrap();
+                    state.config = Some(config);
+                    // The config file now exists: the first-run line is gone.
+                    state.first_run = false;
+                }
                 set_settings_status(panel, "settings saved");
                 // ADR-0008 §1: the toggle applies live — re-sync the
                 // observers with the new rules; enabling also runs one
@@ -1494,13 +1529,23 @@ unsafe fn add_layout_submenu(menu: Id, target: Id, config: &Config) {
 unsafe fn build_menu(target: Id) -> Id {
     // SAFETY: documented class/instance initialisers.
     let menu = unsafe { msg0(class("NSMenu"), sel("new")) };
-    let (config, paused) = {
+    let (config, paused, first_run) = {
         let state = STATE.lock().unwrap();
-        (state.config.clone().unwrap_or_default(), state.paused)
+        (
+            state.config.clone().unwrap_or_default(),
+            state.paused,
+            state.first_run,
+        )
     };
     unsafe {
         msg_bool(menu, sel("setAutoenablesItems:"), false);
         add_status(menu, &status_line());
+        if first_run {
+            // One line, only while no config file exists: name the two facts
+            // a new operator needs (AX trust is already the status line above;
+            // auto-tiling is off by default and where to turn it on).
+            add_status(menu, &first_run_line());
+        }
         msg_void_id(menu, sel("addItem:"), separator());
         add_action(
             menu,
@@ -1568,6 +1613,13 @@ fn status_line_with(state: &ShellState) -> String {
         format!(" · {}", state.status)
     };
     format!("{pause} · {trust} · {fixture}{status}")
+}
+
+/// The first-run guidance line (owner decision 2026-11-07): shown only while
+/// no config file exists. Names auto-tiling's default (OFF) and where to turn
+/// it on — the Accessibility state is already the status line above it.
+fn first_run_line() -> String {
+    "First run — no config file yet: auto-tiling is OFF (enable it in Settings…)".to_string()
 }
 
 /// Accessibility-only line for the menu.
@@ -2282,7 +2334,15 @@ pub fn run() {
         assert!(!target.is_null(), "failed to create the action target");
 
         // Load the config before building the menu so the menu reflects it.
-        STATE.lock().unwrap().config = Some(load_config_or_default());
+        // First run (no file): the menu carries a one-line guidance until a
+        // save writes the config (owner decision 2026-11-07). Automated
+        // paths below never set the flag.
+        {
+            let (config, missing) = load_config_or_default();
+            let mut state = STATE.lock().unwrap();
+            state.config = Some(config);
+            state.first_run = missing;
+        }
 
         // ADR-0007: global hotkey ⌥⌘R — the same action as the menu's
         // reflow (`perform_reflow_real`), registered once here in `run()`
@@ -2462,7 +2522,9 @@ pub fn self_test() -> i32 {
         assert!(!target.is_null(), "failed to create the action target");
 
         // Load the config before building the menu so the menu reflects it.
-        STATE.lock().unwrap().config = Some(load_config_or_default());
+        // Automated evidence: the first-run flag stays off (menu byte-shape
+        // unchanged — the self-test logs the item list as evidence).
+        STATE.lock().unwrap().config = Some(load_config_or_default().0);
 
         let menu = build_menu(target);
         let titles = menu_titles(menu);
@@ -2800,7 +2862,8 @@ pub fn panel_click_proof() -> i32 {
         );
         let target = create_target();
         assert!(!target.is_null(), "failed to create the action target");
-        STATE.lock().unwrap().config = Some(load_config_or_default());
+        // Automated evidence: first-run flag stays off (see self_test).
+        STATE.lock().unwrap().config = Some(load_config_or_default().0);
         let menu = build_menu(target);
         let bar = msg0(class("NSStatusBar"), sel("systemStatusBar"));
         let item = msg_cgfloat(
@@ -3366,5 +3429,52 @@ mod display_geometry_tests {
         assert_eq!(work.bottom(), bounds.bottom());
         assert_eq!(work.x, bounds.x);
         assert_eq!(work.width, bounds.width);
+    }
+}
+
+#[cfg(test)]
+mod first_run_guidance_tests {
+    use super::*;
+
+    // First-run opt-in guidance (owner decision 2026-11-07): only a MISSING
+    // config file is a first run, and the line names auto-tiling's default.
+
+    #[test]
+    fn only_a_missing_config_file_is_a_first_run() {
+        let (config, first_run) = config_for_load(Err(ConfigError::Missing));
+        assert!(first_run);
+        // Defaults apply — auto-tiling stays off (AGENTS.md source of truth).
+        assert!(!config.auto_tiling);
+
+        // A file that exists but fails validation is the owner's profile:
+        // fall back to defaults, but never claim a first run.
+        let (_, first_run) = config_for_load(Err(ConfigError::Parse));
+        assert!(!first_run);
+        let (_, first_run) = config_for_load(Err(ConfigError::NotOwnerOnly));
+        assert!(!first_run);
+
+        // A valid file is not a first run either.
+        let (config, first_run) = config_for_load(Ok(Config::default()));
+        assert!(!first_run);
+        assert!(!config.auto_tiling);
+    }
+
+    #[test]
+    fn first_run_line_names_auto_tiling_off_and_where_to_enable_it() {
+        let line = first_run_line();
+        assert!(line.contains("First run"));
+        assert!(line.contains("auto-tiling is OFF"));
+        assert!(line.contains("Settings"));
+        // The menu never claims atomicity (standing rule).
+        assert!(!line.to_lowercase().contains("atomic"));
+    }
+
+    #[test]
+    fn automated_paths_never_set_the_first_run_flag() {
+        // The flag lives in STATE and is written only by run(); the static's
+        // initial value (what self-test / click-proof build their menu from)
+        // must be off.
+        let state = STATE.lock().unwrap();
+        assert!(!state.first_run);
     }
 }
