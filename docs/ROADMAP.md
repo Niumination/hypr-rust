@@ -107,7 +107,7 @@ One engineer may cover multiple roles; unsafe FFI and permission-sensitive work 
 
 **Planned (not yet validated):**
 
-1. **Operator/production hardening** — `.app` LaunchServices/TCC re-validation after each rebuild, signing/notarization or an accountable distribution strategy, Accessibility-permission guidance under the bundled identity, install/update, and clear first-run auto-tiling opt-in.
+1. **Operator/production hardening** — `.app` LaunchServices/TCC re-validation after each rebuild, signing/notarization or an accountable distribution strategy, Accessibility-permission guidance under the bundled identity, install/update **(script shipped PR #53, first real run pending)**, and clear first-run auto-tiling opt-in **(shipped 2026-11-07: first-run menu guidance + `auto_tiling` default off; host run of the guidance line pending)**.
 2. **Hardware/display matrix** — **host-scoped slice done 2026-11-07** ([HARDWARE-DISPLAY-MATRIX](./HARDWARE-DISPLAY-MATRIX.md): read-only display probe + unit rows for fullscreen/minimized/off-display/work-area + honest NOT RUN rows); repeat on a target Apple Mac; multi-display/mixed-DPI, display/work-area changes and varied apps still pending hardware; document unsupported cases without moving or hiding windows.
 3. **Min-size/fit policy for dense layouts** — clamp-skip stays honest (a skipped window is not tiled); decide whether min-size-aware planning is worth it.
 4. Windows 11 feasibility spike + adapter — waits for a Windows boot; no Windows runtime evidence yet.
