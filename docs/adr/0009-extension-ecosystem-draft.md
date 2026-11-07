@@ -71,9 +71,9 @@ A bar or extension must be able to observe Hypr-Rust state and, eventually, requ
 
 1. **Protocol ADR + schema review:** settle event names, privacy, permissions, config relationship, and dependency choice.
 2. **Read-only IPC prototype (shipped via PR #49, amended 2026-11-07):** `status.get` snapshot over the bounded owner-only Unix socket; the pure parser/response tests run in CI and on the host (platform-macos 103 lib + 2 bin, workspace 29). Native validation executed on the Tahoe host on 2026-11-07 (ARENA Path R): version mismatch, malformed/oversize input, same-UID peer behavior, stale socket, client disconnect, quit cleanup, a live query from `scripts/ipc-status.py`, and proof that the path cannot mutate windows (mutation method rejected) all pass. **Still not runtime-tested:** the other-UID peer gate (single-user host) and the second-instance bind-conflict path. Event streaming is explicitly deferred.
-3. **Native bar consumer:** render the same read-only status through AppKit and verify lifecycle/permission behavior on the Tahoe host.
+3. **Native bar consumer (first consumer = the existing `NSStatusItem`, owner decision 2026-11-07):** render the same read-only status through AppKit and verify lifecycle/permission behavior on the Tahoe host; a richer screen-edge panel is a later product decision.
 4. **External extension SDK:** only after protocol stability; publish sample read-only extension and lifecycle tooling.
-5. **Optional action requests/config adapter:** separate owner decision and acceptance tests; never weaken ADR-0006 or claim original plugin ABI compatibility.
+5. **Action requests, decided 2026-11-07:** only `layout.select` and `reflow.request`, persisted per extension, revocable and visible in settings, with first-run confirmation — implemented as a separate, later, tested step that never weakens ADR-0006 or claims original plugin ABI compatibility. Interop order is native module API → Waybar-style custom-script adapter → config translator.
 
 ## Acceptance and security tests (before any write-capable extension)
 
@@ -84,11 +84,11 @@ A bar or extension must be able to observe Hypr-Rust state and, eventually, requ
 - If action requests are later enabled, all window mutations pass through the existing strict real-window path; fixture-only automated evidence remains fixture-only.
 - No new dependency is introduced without review; CI covers protocol unit/integration tests and the macOS native transport.
 
-## Open questions for owner review
+## Owner decisions (2026-11-07 — the three review questions are resolved)
 
-1. Should the first bar consumer be the existing native menu/status UI, or a separate native bar surface (second screen-edge panel)?
-2. Which Waybar-like interoperability should come first: custom-script output, a limited config translator, or only a native Hypr-Rust module API?
-3. What named action capabilities should be eligible after explicit opt-in (for example `layout.select` and `reflow.request`), and should a grant persist per extension or be confirmed per run?
+1. **First bar consumer = the existing `NSStatusItem`** rendered from the same read-only protocol. A richer second screen-edge panel stays a later product decision; no new UI surface is introduced in the first consumer step.
+2. **Waybar-like interop order = native module API first, custom-script adapter second, config translator last.** The native Hypr-Rust module API consumes the contract our own bar uses; a Waybar-style `custom/…` module adapter (documented JSON text output) follows once the protocol is stable; translating full Waybar config semantics comes only after that, and unsupported modules must be named rather than faked.
+3. **Eligible action capabilities = `layout.select` and `reflow.request` only**, both routed through the same validated shell actions (`reflow.request` = the identical strict ADR-0006 path as the menu and ⌥⌘R). A grant **persists per extension**, is revocable and visible in the settings UI, with a **first-run confirmation** when the extension first requests it. Anything beyond these two named actions, and any direct AX access for extensions, stays out of scope.
 
 ## References
 
