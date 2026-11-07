@@ -18,7 +18,7 @@ use layout_core::{
     WindowId, WindowRole, WindowSnapshot,
 };
 
-use crate::batch::BatchOps;
+use crate::batch::{BatchOps, RestoreVerdict};
 use crate::ffi;
 
 /// Process-lifetime CFString key. CFString constants are immutable and safe
@@ -1080,6 +1080,27 @@ impl BatchOps for MacWindowSet {
             Err(_) => (false, None),
         }
     }
+
+    /// ADR-0006 §2 amendment 2026-11-07: a dead target reports `Gone`
+    /// (nothing left to restore); a live window whose restore failed or read
+    /// back differently stays `Unverified` and keeps the loud partial state.
+    fn restore_verdict(&self, window: WindowKey, before: Rect) -> RestoreVerdict {
+        match self.set_frame(window, before) {
+            Ok(actual) => {
+                if frames_match(before, actual, K_FRAME_TOLERANCE) {
+                    RestoreVerdict::Verified {
+                        actual: Some(actual),
+                    }
+                } else {
+                    RestoreVerdict::Unverified {
+                        actual: Some(actual),
+                    }
+                }
+            }
+            Err(AxError::StaleTarget) => RestoreVerdict::Gone,
+            Err(_) => RestoreVerdict::Unverified { actual: None },
+        }
+    }
 }
 
 /// Fullscreen heuristic: the public AX API exposes no fullscreen flag, so a
@@ -1180,6 +1201,19 @@ impl BatchOps for MacMultiWindowSet {
             Err(_) => return (false, None),
         };
         set.restore(local, before)
+    }
+
+    /// ADR-0006 §2 amendment 2026-11-07: a resolve that no longer finds the
+    /// owning process, or a dead target inside it, reports `Gone`; every live
+    /// window keeps the strict `Unverified` verdict when its restore cannot
+    /// be proven.
+    fn restore_verdict(&self, window: WindowKey, before: Rect) -> RestoreVerdict {
+        let (set, local) = match self.resolve(window) {
+            Ok(resolved) => resolved,
+            Err(AxError::StaleTarget) => return RestoreVerdict::Gone,
+            Err(_) => return RestoreVerdict::Unverified { actual: None },
+        };
+        set.restore_verdict(local, before)
     }
 }
 

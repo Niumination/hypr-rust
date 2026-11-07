@@ -109,6 +109,32 @@ platform-level atomicity. Status/label text must never use the word "atomic".
    deterministic clamp, never how a failure is reported, and never turns a partial
    result into a success.
 
+6. **Gone-target classification (amended 2026-11-07, owner decision after the
+   auto-tiling race runs).** With live auto-tiling enabled, a transient window
+   kept closing *between* preflight and rollback: its restore could never be
+   verified, so the owner's log gained **16 `PARTIAL STATE` lines after the
+   2026-11-03 run (11 `stale target (process/window gone)`, 5
+   `size write rejected before move … window untouched`)** — in every one of
+   them the live windows restored to their exact pre-batch frames and the
+   failing window either no longer existed or had never been written, i.e. a
+   *net-clean* batch wearing a partial-state label. The amendment:
+   - a **loud partial state requires a live window** whose post-restore state
+     cannot be verified. That bar is unchanged and the mismatch race stays
+     loud — unit-tested both ways
+     (`strict_unverifiable_restore_is_a_loud_partial_never_success` vs
+     `strict_target_gone_during_rollback_is_a_clean_refusal`);
+   - a target that **vanished** (process/window gone) is recorded as
+     `target gone` and reported by a clean refusal that names it —
+     `all live windows verified restored, N target(s) gone (window closed
+     mid-batch)` — because there is nothing left to restore or verify;
+   - a failure raised **before the failing window's first write** (dead target,
+     rejected size write, invalid geometry, permission loss) leaves that window
+     untouched by construction, so it is excluded from the rollback set instead
+     of being restored-and-failed;
+   - gone counts are always reported explicitly, the word "atomic" is still
+     never used, and the amendment never turns an unverifiable state of a
+     *live* window into a success.
+
 ### 3. Boundary after this ADR
 
 - **Non-fixture surface:** the interactive menu reflow commands, owner-driven, one

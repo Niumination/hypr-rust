@@ -103,6 +103,19 @@ pub trait BatchOps {
     /// Restore `before` after a later failure and report whether the restore
     /// was verified, plus the observed frame (None if it could not be read).
     fn restore(&self, window: WindowKey, before: Rect) -> (bool, Option<Rect>);
+
+    /// Strict-path rollback verdict with the target-gone classification
+    /// (ADR-0006 §2 amendment 2026-11-07). The default derives from
+    /// [`BatchOps::restore`]; adapters override it so a dead target reports
+    /// [`RestoreVerdict::Gone`] instead of an unverifiable restore.
+    fn restore_verdict(&self, window: WindowKey, before: Rect) -> RestoreVerdict {
+        let (verified, actual) = self.restore(window, before);
+        if verified {
+            RestoreVerdict::Verified { actual }
+        } else {
+            RestoreVerdict::Unverified { actual }
+        }
+    }
 }
 
 /// Map a pure layout plan to native batch targets through one observation's
@@ -138,6 +151,31 @@ pub enum WindowOutcome {
         restored: Rect,
         actual: Option<Rect>,
     },
+    /// The target process/window disappeared before it could be changed (or
+    /// while its restore was attempted): there is nothing left to restore or
+    /// verify. Explicitly **not** a partial state — ADR-0006 §2 amendment
+    /// 2026-11-07. `attempted` is the last known (pre-batch) frame.
+    TargetGone { attempted: Rect },
+}
+
+/// Verdict of one window's rollback in the strict path (ADR-0006 §2
+/// amendment 2026-11-07).
+///
+/// The amendment exists because a real auto-tiling session kept labelling a
+/// *net-clean* batch `PARTIAL STATE`: a transient window closed mid-batch, so
+/// its restore could never be verified, while every live window restored
+/// exactly. A partial state now requires a **live** window whose post-restore
+/// state is unverified; a vanished target is reported as [`Gone`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum RestoreVerdict {
+    /// Net state equals the pre-batch frame (read-back within tolerance).
+    Verified { actual: Option<Rect> },
+    /// The target process/window no longer exists: nothing is left to
+    /// restore. Never counts as a partial state.
+    Gone,
+    /// A live window whose post-restore state could not be verified — the
+    /// only condition that keeps [`StrictStatus::LoudPartial`] honest.
+    Unverified { actual: Option<Rect> },
 }
 
 /// Batch result. `rollback_all_restored` is true only when every restore was
@@ -233,6 +271,76 @@ fn finish<O: BatchOps>(
     }
 }
 
+/// True when `error` was raised **before the failing window's first write**,
+/// so that window is untouched by construction (ADR-0006 §2 amendment
+/// 2026-11-07). Only the two post-write failures can leave a change behind:
+/// the position write rejected after the size landed, and the final
+/// read-back verdict. Every other AX failure surfaces from the geometry
+/// validation, the pre-write frame read, or the first (size) write itself —
+/// all of which happen before anything was applied.
+fn failed_before_first_write(error: &AxError) -> bool {
+    !matches!(
+        error,
+        AxError::PositionAfterSizeFailed { .. }
+            | AxError::VerificationReadFailed { .. }
+            | AxError::VerificationFailed { .. }
+    )
+}
+
+/// Stop a **strict** batch and roll back every window the batch actually
+/// wrote (best effort), applying the ADR-0006 §2 amendment 2026-11-07:
+///
+/// - a vanished target is recorded as [`WindowOutcome::TargetGone`] and never
+///   fails `rollback_all_restored` — there is nothing left to restore;
+/// - only a **live** window whose restore cannot be verified keeps the result
+///   at [`StrictStatus::LoudPartial`].
+fn finish_strict<O: BatchOps>(
+    ops: &O,
+    saved: Vec<(WindowKey, Rect)>,
+    mut outcomes: Vec<(WindowKey, WindowOutcome)>,
+    failed_at: WindowKey,
+    error: AxError,
+) -> StrictBatchResult {
+    let mut all_restored = true;
+    for (window, before) in saved {
+        match ops.restore_verdict(window, before) {
+            RestoreVerdict::Verified { actual } => record_outcome(
+                &mut outcomes,
+                window,
+                WindowOutcome::RolledBack {
+                    restored: before,
+                    actual,
+                },
+            ),
+            RestoreVerdict::Gone => record_outcome(
+                &mut outcomes,
+                window,
+                WindowOutcome::TargetGone { attempted: before },
+            ),
+            RestoreVerdict::Unverified { actual } => {
+                all_restored = false;
+                record_outcome(
+                    &mut outcomes,
+                    window,
+                    WindowOutcome::RolledBack {
+                        restored: before,
+                        actual,
+                    },
+                );
+            }
+        }
+    }
+    StrictBatchResult {
+        refused_before_write: false,
+        result: BatchResult {
+            outcomes,
+            failed_at: Some(failed_at),
+            error: Some(error),
+            rollback_all_restored: all_restored,
+        },
+    }
+}
+
 /// Honest three-way verdict of a strict batch (ADR-0006 §2): success, clean
 /// refusal, or loud partial state. No variant ever claims atomicity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,9 +351,11 @@ pub enum StrictStatus {
     /// first write, or a failure restored every changed window and each
     /// restore was verified.
     CleanRefusal,
-    /// At least one changed window could not be restored and verified; the
-    /// observed frames are in [`StrictBatchResult::result`]'s outcomes. Never
-    /// reported as success.
+    /// At least one **live** changed window could not be restored and
+    /// verified; the observed frames are in [`StrictBatchResult::result`]'s
+    /// outcomes. A target that vanished mid-batch does not qualify — there is
+    /// nothing left to restore (§2 amendment 2026-11-07). Never reported as
+    /// success.
     LoudPartial,
 }
 
@@ -270,6 +380,17 @@ impl StrictBatchResult {
             StrictStatus::LoudPartial
         }
     }
+
+    /// ADR-0006 §2 amendment 2026-11-07: how many targets vanished while the
+    /// batch ran (window/process gone). Never a partial state — there is
+    /// nothing left to restore — but always reported explicitly.
+    pub fn targets_gone(&self) -> usize {
+        self.result
+            .outcomes
+            .iter()
+            .filter(|(_, outcome)| matches!(outcome, WindowOutcome::TargetGone { .. }))
+            .count()
+    }
 }
 
 /// Apply `targets` with the strict no-partial contract (ADR-0006):
@@ -280,13 +401,17 @@ impl StrictBatchResult {
 /// 2. **Verified writes** in plan order, each through the single-window
 ///    no-partial `BatchOps::set_frame` contract; the first failure stops the
 ///    batch.
-/// 3. **Full rollback**: every window already written — including the failed
-///    one, whose single-window transaction may have left a partial write — is
-///    restored to its preflight frame and the restore is verified.
+/// 3. **Full rollback**: every window already written is restored to its
+///    preflight frame and the restore is verified. A failure raised before
+///    the failing window's first write leaves that window untouched and it is
+///    not rolled back at all (§2 amendment 2026-11-07).
 ///
 /// Strict no-partial is a product promise, not platform atomicity: a restore
-/// that cannot be verified surfaces as [`StrictStatus::LoudPartial`] with the
-/// observed frames, never as success (ADR-0006 §2; Paths F–H residual race).
+/// of a **live** window that cannot be verified surfaces as
+/// [`StrictStatus::LoudPartial`] with the observed frames, never as success
+/// (ADR-0006 §2; Paths F–H residual race). A target that vanished mid-batch
+/// is recorded as [`WindowOutcome::TargetGone`] and reported as a clean
+/// refusal note — there is nothing left to restore.
 pub fn apply_batch_strict<O: BatchOps>(ops: &O, targets: &[BatchTarget]) -> StrictBatchResult {
     // Phase 1 - preflight: read every frame before the first write.
     let mut saved: Vec<(WindowKey, Rect)> = Vec::with_capacity(targets.len());
@@ -312,7 +437,7 @@ pub fn apply_batch_strict<O: BatchOps>(ops: &O, targets: &[BatchTarget]) -> Stri
     let mut outcomes: Vec<(WindowKey, WindowOutcome)> = Vec::new();
     for (target, (_, before)) in targets.iter().zip(&saved) {
         // Saved before the attempt: set_frame may leave a partial write on
-        // failure, so the failed window is part of the rollback set too.
+        // failure, so a window that was written is part of the rollback set.
         written.push((target.window, *before));
         match ops.set_frame(target.window, target.rect) {
             Ok(actual) => record_outcome(
@@ -324,11 +449,22 @@ pub fn apply_batch_strict<O: BatchOps>(ops: &O, targets: &[BatchTarget]) -> Stri
                 },
             ),
             Err(error) => {
-                let result = finish(ops, written, outcomes, target.window, error);
-                return StrictBatchResult {
-                    refused_before_write: false,
-                    result,
-                };
+                // ADR-0006 §2 amendment 2026-11-07: a failure raised before
+                // this window's first write leaves it untouched, so it is not
+                // rolled back at all; a dead target is recorded as gone
+                // instead of being reported as an unverifiable restore.
+                let mut rollback_set = written;
+                if failed_before_first_write(&error) {
+                    rollback_set.pop();
+                    if matches!(error, AxError::StaleTarget) {
+                        record_outcome(
+                            &mut outcomes,
+                            target.window,
+                            WindowOutcome::TargetGone { attempted: *before },
+                        );
+                    }
+                }
+                return finish_strict(ops, rollback_set, outcomes, target.window, error);
             }
         }
     }
@@ -462,6 +598,10 @@ mod tests {
         fail_set: HashSet<u64>,
         fail_read: HashSet<u64>,
         fail_restore: HashSet<u64>,
+        /// Targets whose first write fails with a dead-target AX error.
+        fail_stale: HashSet<u64>,
+        /// Targets whose rollback verdict is `Gone` (vanished mid-batch).
+        gone_restore: HashSet<u64>,
         writes: RefCell<Vec<(u64, &'static str)>>,
     }
 
@@ -491,6 +631,9 @@ mod tests {
         }
 
         fn set_frame(&self, window: WindowKey, rect: Rect) -> Result<Rect, AxError> {
+            if self.fail_stale.contains(&window.0) {
+                return Err(AxError::StaleTarget);
+            }
             if self.fail_set.contains(&window.0) {
                 return Err(AxError::Failure(-25200));
             }
@@ -506,6 +649,19 @@ mod tests {
             self.frames.borrow_mut().insert(window.0, before);
             self.writes.borrow_mut().push((window.0, "restore"));
             (true, Some(before))
+        }
+
+        fn restore_verdict(&self, window: WindowKey, before: Rect) -> RestoreVerdict {
+            if self.gone_restore.contains(&window.0) {
+                // The target vanished while the rollback ran.
+                return RestoreVerdict::Gone;
+            }
+            let (verified, actual) = self.restore(window, before);
+            if verified {
+                RestoreVerdict::Verified { actual }
+            } else {
+                RestoreVerdict::Unverified { actual }
+            }
         }
     }
 
@@ -694,11 +850,15 @@ mod tests {
         assert!(result.result.rollback_all_restored);
         // Clean refusal: every changed window restored and verified.
         assert_eq!(result.status(), StrictStatus::CleanRefusal);
-        assert!(result
-            .result
-            .outcomes
-            .iter()
-            .all(|(_, outcome)| matches!(outcome, WindowOutcome::RolledBack { .. })));
+        assert_eq!(result.targets_gone(), 0);
+        // Window 1 (written) reports the rollback; window 2 failed before its
+        // first write (ADR-0006 §2 amendment 2026-11-07) so it is untouched
+        // and never rolled back at all.
+        assert_eq!(result.result.outcomes.len(), 1);
+        assert!(matches!(
+            result.result.outcomes[0],
+            (WindowKey(1), WindowOutcome::RolledBack { .. })
+        ));
         // Window 1 back at its preflight frame; window 2 never moved.
         assert_eq!(
             ops.frames.borrow().get(&1),
@@ -708,8 +868,66 @@ mod tests {
             ops.frames.borrow().get(&2),
             Some(&Rect::new(0.0, 0.0, 100.0, 50.0))
         );
-        // 1 successful set + 2 restores (failed window included).
+        // 1 successful set + 1 restore (the untouched failed window gets none).
+        assert_eq!(ops.writes.borrow().len(), 2);
+    }
+
+    #[test]
+    fn strict_target_gone_during_rollback_is_a_clean_refusal() {
+        let mut ops = MockBatch::with(&[
+            (1, Rect::new(0.0, 0.0, 100.0, 50.0)),
+            (2, Rect::new(0.0, 0.0, 100.0, 50.0)),
+            (3, Rect::new(0.0, 0.0, 100.0, 50.0)),
+        ]);
+        // Window 3 refuses its first write (untouched); windows 1 and 2 were
+        // written, and window 1 vanished before its restore could be proven.
+        ops.fail_set.insert(3);
+        ops.gone_restore.insert(1);
+        let result = apply_batch_strict(
+            &ops,
+            &[
+                target(1, 10.0, 10.0, 200.0, 100.0),
+                target(2, 220.0, 10.0, 200.0, 100.0),
+                target(3, 440.0, 10.0, 200.0, 100.0),
+            ],
+        );
+        assert!(!result.refused_before_write);
+        // A vanished target is not a partial state (ADR-0006 §2 amendment).
+        assert_eq!(result.status(), StrictStatus::CleanRefusal);
+        assert!(result.result.rollback_all_restored);
+        assert_eq!(result.targets_gone(), 1);
+        assert!(result
+            .result
+            .outcomes
+            .iter()
+            .any(|(key, outcome)| *key == WindowKey(1)
+                && matches!(outcome, WindowOutcome::TargetGone { .. })));
+        // set 1 + set 2 + restore 2; gone/untouched windows are never restored.
         assert_eq!(ops.writes.borrow().len(), 3);
+    }
+
+    #[test]
+    fn strict_target_dead_at_first_write_reports_gone_not_partial() {
+        let mut ops = MockBatch::with(&[
+            (1, Rect::new(0.0, 0.0, 100.0, 50.0)),
+            (2, Rect::new(0.0, 0.0, 100.0, 50.0)),
+        ]);
+        // The second window died between preflight and its first write — the
+        // exact log pattern of the 2026-11-04..07 auto-tiling runs.
+        ops.fail_stale.insert(2);
+        let result = apply_batch_strict(
+            &ops,
+            &[
+                target(1, 10.0, 10.0, 200.0, 100.0),
+                target(2, 220.0, 10.0, 200.0, 100.0),
+            ],
+        );
+        assert_eq!(result.result.error, Some(AxError::StaleTarget));
+        assert_eq!(result.status(), StrictStatus::CleanRefusal);
+        assert!(result.result.rollback_all_restored);
+        assert_eq!(result.targets_gone(), 1);
+        // set 1 + restore 1; the dead target is not restored.
+        assert_eq!(ops.writes.borrow().len(), 2);
     }
 
     #[test]

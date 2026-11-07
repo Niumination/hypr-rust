@@ -2082,10 +2082,23 @@ fn strict_status_text(
                 error_of(result)
             )
         }
-        batch::StrictStatus::CleanRefusal => format!(
-            "{label}: refused ({}) — all windows restored{failed}{extras}",
-            error_of(result)
-        ),
+        batch::StrictStatus::CleanRefusal => {
+            // ADR-0006 §2 amendment 2026-11-07: a target that vanished
+            // mid-batch is not a partial state — say so explicitly instead of
+            // implying every target is still present.
+            let gone = result.targets_gone();
+            let restored_note = if gone > 0 {
+                format!(
+                    "— all live windows verified restored, {gone} target(s) gone (window closed mid-batch)"
+                )
+            } else {
+                "— all windows restored".to_string()
+            };
+            format!(
+                "{label}: refused ({}) {restored_note}{failed}{extras}",
+                error_of(result)
+            )
+        }
         batch::StrictStatus::LoudPartial => {
             let frames: Vec<String> = result
                 .result
@@ -2098,6 +2111,10 @@ fn strict_status_text(
                         actual
                             .map(|frame| format!("{frame:?}"))
                             .unwrap_or_else(|| "unreadable".to_string())
+                    )),
+                    batch::WindowOutcome::TargetGone { attempted } => Some(format!(
+                        "key {}: target gone (window closed mid-batch; last known {attempted:?})",
+                        key.0
                     )),
                     batch::WindowOutcome::Applied { .. } => None,
                 })
@@ -3150,6 +3167,45 @@ mod strict_status_text_tests {
         assert!(text.contains("failed at key 2"));
         assert!(!text.to_lowercase().contains("atomic"));
         assert_eq!(refusal(false).status(), StrictStatus::CleanRefusal);
+    }
+
+    #[test]
+    fn refusal_with_gone_targets_reports_them_explicitly() {
+        // ADR-0006 §2 amendment 2026-11-07: the transient window that closed
+        // mid-batch is named instead of being implied restored — and the
+        // status never reads as PARTIAL STATE when every live window verified.
+        let mut result = refusal(false);
+        result.result.outcomes = vec![(
+            WindowKey(9),
+            WindowOutcome::TargetGone {
+                attempted: Rect::new(0.0, 0.0, 100.0, 50.0),
+            },
+        )];
+        let text = strict_status_text("Reflow", &result, 0, 0, 0);
+        assert!(text.contains("refused"));
+        assert!(text.contains("all live windows verified restored"));
+        assert!(text.contains("1 target(s) gone"));
+        assert!(!text.contains("PARTIAL STATE"));
+        assert!(!text.to_lowercase().contains("atomic"));
+        assert_eq!(result.status(), StrictStatus::CleanRefusal);
+        assert_eq!(result.targets_gone(), 1);
+    }
+
+    #[test]
+    fn loud_partial_names_a_gone_target_alongside_live_failures() {
+        let mut result = loud_partial();
+        result.result.outcomes.push((
+            WindowKey(4),
+            WindowOutcome::TargetGone {
+                attempted: Rect::new(0.0, 0.0, 50.0, 50.0),
+            },
+        ));
+        let text = strict_status_text("Reflow", &result, 0, 0, 0);
+        // A live unverified window still drives the loud partial state.
+        assert_eq!(result.status(), StrictStatus::LoudPartial);
+        assert!(text.contains("PARTIAL STATE"));
+        assert!(text.contains("key 4: target gone"));
+        assert!(!text.to_lowercase().contains("atomic"));
     }
 
     #[test]

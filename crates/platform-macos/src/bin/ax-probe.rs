@@ -421,6 +421,9 @@ fn print_batch_result(result: &BatchResult) {
                     window.0
                 );
             }
+            WindowOutcome::TargetGone { attempted } => {
+                println!("  key={} target_gone last_known={attempted:?}", window.0);
+            }
         }
     }
     if let Some(error) = &result.error {
