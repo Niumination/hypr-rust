@@ -76,3 +76,21 @@ Honest limits of this packaging slice — read before describing it to anyone:
 4. **macOS floor is 26,** matching the pinned build; the PRD floor of Ventura 13 is not met by these builds and is not claimed.
 5. No icon yet; the app name/bundle id defaults were chosen as the neutral crate identity and are overridable via env.
 6. Windows packaging: nothing — the Windows adapter is not implemented and nothing Windows-side is validated.
+
+## Install / update — `scripts/install-macos.sh` (owner-run; NOT host-validated yet)
+
+Installs the freshly packaged bundle to **`~/Applications/ax-shell.app`** and registers a **LaunchAgent** (`~/Library/LaunchAgents/io.github.niumination.ax-shell.plist`, `RunAtLoad`) so the shell starts at login. Owner decisions 2026-11-07: `~/Applications` (no sudo) + LaunchAgent autostart.
+
+| invocation | effect |
+|---|---|
+| `scripts/install-macos.sh` | package → stop running instance → replace bundle → write/load LaunchAgent → verify → print TCC next steps |
+| `scripts/install-macos.sh --dry-run` | print every action, change nothing (verified 2026-11-07: syntax, shellcheck, dry-run on host — no bundle/plist created) |
+| `scripts/install-macos.sh --uninstall` | bootout agent, remove plist + installed bundle; `~/.hypr-rust/` config and logs are never touched |
+
+Behavior notes:
+
+- **Running instance:** stopped with `TERM` first (the shell has no SIGTERM handler — it exits at once; windows keep their last OS-accepted frames and the stale IPC socket is removed by the next start). A straggler is warned about, **never force-killed**.
+- **Update = re-run the script** (fresh build replaces the bundle, agent is re-bootstrapped).
+- **TCC after every install:** the ad-hoc cdhash changed — remove (`-`) and re-add (`+`) `~/Applications/ax-shell.app` in System Settings → Privacy & Security → Accessibility (a toggle alone is not enough; owner-confirmed 2026-10-26). The script prints this reminder but cannot do it (manual GUI step).
+- **Verification:** `open ~/Applications/ax-shell.app --args --self-test`, then the `self-test: exit` line in `~/.hypr-rust/shell.log`.
+- Honest status: **the real install path has not been executed on the host yet** — only `bash -n`, `shellcheck`, and `--dry-run` are verified (2026-11-07). First real run + TCC re-grant + self-test is the owner's step; runtime evidence follows in a separate docs update.
