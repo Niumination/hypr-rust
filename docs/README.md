@@ -41,6 +41,7 @@ The product boundary is documented in [ADR-0001](./adr/0001-product-boundary.md)
 20. [Capability matrix (per platform / OS build)](./CAPABILITY-MATRIX.md)
 21. [Using ax-shell — operations, configuration and local packaging](./USING-AX-SHELL.md)
 22. [ADR-0009 draft: extension protocol and Waybar-like integration](./adr/0009-extension-ecosystem-draft.md)
+23. [Hardware/display matrix (macOS, host-scoped evidence)](./HARDWARE-DISPLAY-MATRIX.md)
 
 ## Non-goals and important caveats
 

@@ -1471,6 +1471,44 @@ mod tests {
     }
 
     #[test]
+    fn center_inside_membership_is_boundary_exact() {
+        // Hardware/display matrix: membership uses the window CENTER with a
+        // half-open range — a center exactly on an edge is out, one point
+        // inside is in. Single-display host evidence lives in
+        // docs/HARDWARE-DISPLAY-MATRIX.md; this pins the math.
+        let display = Rect::new(0.0, 0.0, 1920.0, 1080.0);
+        // Center on the right edge (x = 1920.0) — excluded.
+        assert!(!center_inside(
+            Rect::new(1900.0, 500.0, 40.0, 40.0),
+            display
+        ));
+        // Center one point inside (x = 1919.0) — included.
+        assert!(center_inside(Rect::new(1899.0, 500.0, 40.0, 40.0), display));
+        // Center exactly on the bottom edge (y = 1080.0) — excluded.
+        assert!(!center_inside(
+            Rect::new(500.0, 1060.0, 40.0, 40.0),
+            display
+        ));
+        // Window mostly off-screen but center still inside — included
+        // (partial overlap is the tiler's business, not membership's).
+        assert!(center_inside(
+            Rect::new(-300.0, -300.0, 700.0, 700.0),
+            display
+        ));
+        // Center on a hypothetical display placed right of the main one —
+        // excluded from the main display's membership.
+        assert!(!center_inside(
+            Rect::new(2000.0, 500.0, 40.0, 40.0),
+            display
+        ));
+        // Same window belongs to that second display's rectangle.
+        assert!(center_inside(
+            Rect::new(2000.0, 500.0, 40.0, 40.0),
+            Rect::new(1920.0, 0.0, 2560.0, 1440.0)
+        ));
+    }
+
+    #[test]
     fn drop_non_target_windows_removes_non_normal_and_off_display() {
         let work = Rect::new(0.0, 24.0, 1920.0, 1056.0);
         let display = Rect::new(0.0, 0.0, 1920.0, 1080.0);

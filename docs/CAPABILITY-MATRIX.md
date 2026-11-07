@@ -33,3 +33,5 @@ PRD requirement ("publish a capability matrix per platform/OS build; do not clai
 ## Build hosts (not runtime validation)
 
 CI (GitHub `macos-26` images, SDK 26, toolchain 1.98.1) runs fmt/clippy/tests and the packaging script on **both** jobs. A green CI is a compile/package-path check, **not** runtime validation — runtime rows above are host-bound only.
+
+Display/hardware scenarios (fullscreen/minimized/off-display exclusions, work-area math, and the NOT RUN rows for Apple Mac, multi-display, mixed-DPI, resolution change and hot-plug) have their own evidence table: [HARDWARE-DISPLAY-MATRIX](./HARDWARE-DISPLAY-MATRIX.md).
