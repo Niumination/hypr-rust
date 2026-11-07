@@ -1637,12 +1637,25 @@ pub(crate) fn append_log(line: &str) {
 fn work_area() -> Rect {
     // SAFETY: both are documented CoreGraphics entry points with no state.
     let bounds = unsafe { ffi::CGDisplayBounds(ffi::CGMainDisplayID()) };
+    work_area_from(Rect::new(
+        bounds.origin.x,
+        bounds.origin.y,
+        bounds.size.width,
+        bounds.size.height,
+    ))
+}
+
+/// Pure work-area derivation: display bounds minus the menu-bar strip at the
+/// top (AX frames share the same top-left-origin global space). Split out
+/// from [`work_area`] so the inset/clamp math is unit-testable without a
+/// display (hardware/display matrix, 2026-11-07).
+fn work_area_from(bounds: Rect) -> Rect {
     let inset = ffi::K_MENU_BAR_INSET;
     Rect::new(
-        bounds.origin.x,
-        bounds.origin.y + inset,
-        bounds.size.width.max(1.0),
-        (bounds.size.height - inset).max(1.0),
+        bounds.x,
+        bounds.y + inset,
+        bounds.width.max(1.0),
+        (bounds.height - inset).max(1.0),
     )
 }
 
@@ -3306,5 +3319,52 @@ mod strict_status_text_tests {
         // No skip list is a pure clone: nothing is dropped by accident.
         let untouched = snapshot_without_unfit(&observation, &[]);
         assert_eq!(untouched, observation.snapshot);
+    }
+}
+
+#[cfg(test)]
+mod display_geometry_tests {
+    use super::*;
+
+    // Hardware/display matrix (docs/HARDWARE-DISPLAY-MATRIX.md): the display
+    // math runs unit-side without a display; host rows are separate evidence.
+
+    #[test]
+    fn work_area_strips_the_menu_bar_from_display_bounds() {
+        // The documented host display: 1920x1080, top-left origin.
+        let work = work_area_from(Rect::new(0.0, 0.0, 1920.0, 1080.0));
+        assert_eq!(work, Rect::new(0.0, 30.0, 1920.0, 1050.0));
+    }
+
+    #[test]
+    fn work_area_keeps_a_nonzero_origin_display_offset() {
+        // A hypothetical second display placed to the right: only the
+        // menu-bar strip is inset; x/width pass through unchanged.
+        let work = work_area_from(Rect::new(1920.0, 0.0, 2560.0, 1440.0));
+        assert_eq!(work, Rect::new(1920.0, 30.0, 2560.0, 1410.0));
+    }
+
+    #[test]
+    fn work_area_of_a_degenerate_display_stays_positive() {
+        // Height smaller than the inset (and zero width) must not produce a
+        // non-positive rectangle — the clamp is what keeps the planner honest.
+        let work = work_area_from(Rect::new(0.0, 0.0, 0.0, 20.0));
+        assert!(work.is_finite_and_positive());
+        assert_eq!(work.width, 1.0);
+        assert_eq!(work.height, 1.0);
+    }
+
+    #[test]
+    fn work_area_inset_matches_the_documented_menu_bar_constant() {
+        // The 30 pt strip is a documented constant (ffi::K_MENU_BAR_INSET),
+        // not a measured value: ties the math to the same symbol the FFI
+        // layer documents.
+        let bounds = Rect::new(100.0, 50.0, 800.0, 600.0);
+        let work = work_area_from(bounds);
+        assert_eq!(work.y - bounds.y, ffi::K_MENU_BAR_INSET);
+        // The strip is taken from the top only: the bottom edge is unchanged.
+        assert_eq!(work.bottom(), bounds.bottom());
+        assert_eq!(work.x, bounds.x);
+        assert_eq!(work.width, bounds.width);
     }
 }
