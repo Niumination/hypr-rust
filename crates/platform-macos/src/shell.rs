@@ -28,6 +28,7 @@ use crate::adapter::{
 use crate::batch;
 use crate::config::{dialog_policy_for, rules_json, Config, ConfigError, DialogPolicy, WindowRule};
 use crate::ffi::{self, CGFloat};
+use crate::tcc::{self, Staleness};
 use crate::{fixture, process_alive};
 
 /// Objective-C object / selector handles. Both are opaque pointers.
@@ -1598,10 +1599,7 @@ fn status_line() -> String {
 /// The status line from an already-locked state: callers that hold `STATE`
 /// (diagnostics) use this so the mutex is never re-locked.
 fn status_line_with(state: &ShellState) -> String {
-    let trust = match MacAxAdapter::connect() {
-        Ok(_) => "Accessibility: granted",
-        Err(_) => "Accessibility: denied",
-    };
+    let trust = status_trust_cell(ax_trust());
     let fixture = match fixture::registered_fixture_pid() {
         Some(pid) if process_alive(pid) => format!("fixture pid={pid}"),
         _ => "no live fixture".to_string(),
@@ -1622,11 +1620,58 @@ fn first_run_line() -> String {
     "First run — no config file yet: auto-tiling is OFF (enable it in Settings…)".to_string()
 }
 
+/// Accessibility trust for the status/menu lines, with drift context.
+///
+/// On `granted`, the running bundle's cdhash is recorded (best-effort,
+/// write only when changed) so a later denial can be told apart from a
+/// stale grant (owner decision 2026-11-09: state file + denied-only
+/// message). The AX gate itself stays [`MacAxAdapter::connect`] — this
+/// never grants or revokes anything; it only reads a signature and
+/// compares it with `~/.hypr-rust/ax-grant.state`.
+enum AxTrust {
+    Granted,
+    /// Denied, with the recorded-grant comparison (`Stale` only when both
+    /// cdhashes are known and differ).
+    Denied(Staleness),
+}
+
+/// Evaluate Accessibility trust and record the granted identity.
+fn ax_trust() -> AxTrust {
+    if MacAxAdapter::connect().is_ok() {
+        if let (Some(path), Some(cdhash)) = (tcc::state_path(), tcc::current_cdhash()) {
+            tcc::record_granted(&path, cdhash);
+        }
+        return AxTrust::Granted;
+    }
+    let recorded = tcc::state_path().and_then(|path| tcc::read_recorded(&path));
+    AxTrust::Denied(tcc::staleness(tcc::current_cdhash(), recorded.as_deref()))
+}
+
+/// The trust cell of the one-line status (pure; testable without live AX).
+fn status_trust_cell(trust: AxTrust) -> &'static str {
+    match trust {
+        AxTrust::Granted => "Accessibility: granted",
+        AxTrust::Denied(Staleness::Stale) => "Accessibility: denied — stale grant",
+        AxTrust::Denied(_) => "Accessibility: denied",
+    }
+}
+
 /// Accessibility-only line for the menu.
 fn accessibility_line() -> String {
-    match MacAxAdapter::connect() {
-        Ok(_) => "Accessibility: granted".to_string(),
-        Err(_) => {
+    accessibility_line_with(ax_trust())
+}
+
+/// The accessibility menu line from an already-evaluated trust (pure).
+fn accessibility_line_with(trust: AxTrust) -> String {
+    match trust {
+        AxTrust::Granted => "Accessibility: granted".to_string(),
+        AxTrust::Denied(Staleness::Stale) => {
+            // A TCC entry exists but records an older signature: the entry
+            // must be removed (`−`) and re-added (`+`) — a toggle alone
+            // cannot refresh the recorded cdhash (owner-confirmed 2026-10-26).
+            "Accessibility: denied — stale grant: remove and re-add the entry in System Settings > Privacy & Security".to_string()
+        }
+        AxTrust::Denied(_) => {
             "Accessibility: denied — grant it in System Settings > Privacy & Security".to_string()
         }
     }
@@ -3476,5 +3521,62 @@ mod first_run_guidance_tests {
         // must be off.
         let state = STATE.lock().unwrap();
         assert!(!state.first_run);
+    }
+}
+
+#[cfg(test)]
+mod tcc_drift_message_tests {
+    use super::{accessibility_line_with, status_trust_cell, AxTrust};
+    use crate::tcc::Staleness;
+
+    // Stale-grant detection (owner decision 2026-11-09): only a DENIED
+    // trust with a proven cdhash mismatch changes the message; everything
+    // else keeps the exact pre-existing text.
+
+    #[test]
+    fn denied_without_drift_keeps_the_exact_generic_text() {
+        let menu = accessibility_line_with(AxTrust::Denied(Staleness::Unknown));
+        assert_eq!(
+            menu,
+            "Accessibility: denied — grant it in System Settings > Privacy & Security"
+        );
+        let menu = accessibility_line_with(AxTrust::Denied(Staleness::Match));
+        assert_eq!(
+            menu,
+            "Accessibility: denied — grant it in System Settings > Privacy & Security"
+        );
+        assert_eq!(
+            status_trust_cell(AxTrust::Denied(Staleness::Unknown)),
+            "Accessibility: denied"
+        );
+    }
+
+    #[test]
+    fn denied_with_a_proven_mismatch_names_the_remove_and_re_add_ritual() {
+        let menu = accessibility_line_with(AxTrust::Denied(Staleness::Stale));
+        assert!(menu.starts_with("Accessibility: denied — stale grant"));
+        assert!(menu.contains("remove and re-add"));
+        assert!(menu.contains("System Settings > Privacy & Security"));
+        // The misleading generic instruction must be gone on this path.
+        assert!(!menu.contains("grant it in"));
+        assert_eq!(
+            status_trust_cell(AxTrust::Denied(Staleness::Stale)),
+            "Accessibility: denied — stale grant"
+        );
+    }
+
+    #[test]
+    fn granted_is_unchanged_and_never_stale() {
+        let menu = accessibility_line_with(AxTrust::Granted);
+        assert_eq!(menu, "Accessibility: granted");
+        assert_eq!(
+            status_trust_cell(AxTrust::Granted),
+            "Accessibility: granted"
+        );
+        // Standing rule: status text never claims atomicity.
+        assert!(!menu.to_lowercase().contains("atomic"));
+        assert!(!accessibility_line_with(AxTrust::Denied(Staleness::Stale))
+            .to_lowercase()
+            .contains("atomic"));
     }
 }
