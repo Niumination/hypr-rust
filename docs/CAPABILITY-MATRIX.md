@@ -12,6 +12,7 @@ PRD requirement ("publish a capability matrix per platform/OS build; do not clai
 | Dialog/floating panel exclusion & size-write refusal | PASS / HONEST-REFUSAL (`-25200` size write after position, per-window rollback restored) | PLATFORM-SPIKES dialog section, ARENA Path J (include+dialogs=off round) |
 | Read-only enumeration/geometry probe | PASS (read-only; not control evidence) | [PLATFORM-SPIKES](./PLATFORM-SPIKES.md) windows section |
 | Accessibility permission denial path | PASS one launchd context (exit 3) | 2026-10-23 runtime test, ARENA §6 caveat |
+| **TCC stale-grant detection** (on `granted` record the running bundle's cdhash in `~/.hypr-rust/ax-grant.state`; on `denied`, a known mismatch shows `stale grant: remove and re-add…`, everything else keeps the generic grant text) | **IMPLEMENTED (owner decision 2026-11-09) — unit-tested only**: parser vs verbatim `codesign -dv` output, staleness matrix (drift claimed only when both cdhashes known and differ), granted/denied text paths; **NOT host-validated** — no granted → rebuild → denied cycle run on the host yet | `crates/platform-macos/src/tcc.rs`; USING-AX-SHELL §Install TCC notes |
 | Menu-bar shell: status, reflow, pause, diagnostics, quit | PASS | ARENA Path J / host run 2026-10-24 |
 | Settings panel + **row-based rules editor** (Save canonical JSON; click-path `performClick:` proof; per-field number validation + in-panel status line) | PASS | Paths J → L → M |
 | Reflow on two fixture windows (master-stack/columns) | PASS fixture-bound | ARENA Path K/L/M self-tests |

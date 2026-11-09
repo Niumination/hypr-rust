@@ -18,6 +18,7 @@ pub mod fixture;
 pub mod hotkey;
 mod ipc;
 pub mod shell;
+mod tcc;
 
 pub use adapter::{
     global_window_key, map_ax_error, observation_from_windows, process_alive,
